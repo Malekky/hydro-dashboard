@@ -1,0 +1,20 @@
+{
+  "name": "hydro-scripts",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "fetch-tvl": "node fetch-tvl.js",
+    "fetch-liquidity": "node fetch-liquidity.js",
+    "fetch-tributes": "node fetch-tributes.js",
+    "fetch-rounds": "node fetch-rounds.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "@cosmjs/cosmwasm-stargate": "^0.32.4",
+    "node-fetch": "^3.3.2"
+  }
+}

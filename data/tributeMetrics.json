@@ -1,0 +1,53 @@
+{
+  "totalTributes": 6423.4722600000005,
+  "lowestTribute": 0.0000025899999999999998,
+  "averageTribute": 229.40972357142863,
+  "highestTribute": 0,
+  "projectTributes": [
+    {
+      "name": "Mars Protocol",
+      "value": 1701.94386,
+      "color": "#82ca9d"
+    },
+    {
+      "name": "Shade Protocol",
+      "value": 1554,
+      "color": "#a4de6c"
+    },
+    {
+      "name": "Stride",
+      "value": 1048.2984000000001,
+      "color": "#a4de6c"
+    },
+    {
+      "name": "Fenix Directive",
+      "value": 900,
+      "color": "#8dd1e1"
+    },
+    {
+      "name": "White Whale",
+      "value": 400,
+      "color": "#83a6ed"
+    },
+    {
+      "name": "Demex",
+      "value": 308.75,
+      "color": "#8884d8"
+    },
+    {
+      "name": "Neptune Finance",
+      "value": 210,
+      "color": "#ffc658"
+    },
+    {
+      "name": "Nolus",
+      "value": 200.48,
+      "color": "#d0ed57"
+    },
+    {
+      "name": "Margined",
+      "value": 100,
+      "color": "#82ca9d"
+    }
+  ]
+}

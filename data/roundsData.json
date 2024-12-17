@@ -1,0 +1,67 @@
+{
+  "rounds": [
+    {
+      "round": 1,
+      "trancheSize": 139586.16,
+      "tributesPaid": 1523.24,
+      "projectsParticipated": 8,
+      "liquidityWon": [
+        {
+          "name": "Drop",
+          "value": 50000,
+          "percentage": 35,
+          "color": "#ff8042"
+        },
+        {
+          "name": "Shade Protocol",
+          "value": 36093.63,
+          "percentage": 25,
+          "color": "#a4de6c"
+        },
+        {
+          "name": "Neptune Finance",
+          "value": 18000,
+          "percentage": 12,
+          "color": "#ffc658"
+        },
+        {
+          "name": "Margined",
+          "value": 10557.4,
+          "percentage": 7,
+          "color": "#82ca9d"
+        },
+        {
+          "name": "Demex",
+          "value": 10000,
+          "percentage": 7,
+          "color": "#8884d8"
+        },
+        {
+          "name": "Nolus",
+          "value": 10000,
+          "percentage": 7,
+          "color": "#d0ed57"
+        },
+        {
+          "name": "White Whale",
+          "value": 3143.87,
+          "percentage": 2,
+          "color": "#83a6ed"
+        },
+        {
+          "name": "Fenix Directive",
+          "value": 1791.26,
+          "percentage": 1,
+          "color": "#8dd1e1"
+        }
+      ]
+    },
+    {
+      "round": 2,
+      "trancheSize": 0,
+      "tributesPaid": 4900.232260000001,
+      "projectsParticipated": 10,
+      "liquidityWon": []
+    }
+  ]
+}
