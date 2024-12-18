@@ -1,6 +1,6 @@
 [build]
 builder = "nixpacks"
-buildCommand = "npm install --no-audit --legacy-peer-deps && npm run build"
+buildCommand = "npm install --legacy-peer-deps && npm run build"
 
 [deploy]
 startCommand = "npm start"
@@ -13,3 +13,11 @@ NPM_CONFIG_PRODUCTION = "false"
 
 [phases.setup]
 nixPkgs = ["nodejs@18", "npm"]
+
+[phases.install]
+cmds = ["npm install --legacy-peer-deps"]
+ignoredPaths = ["node_modules"]
+
+[phases.build]
+dependsOn = ["install"]
+cmds = ["npm run build"]
