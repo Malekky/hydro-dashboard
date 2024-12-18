@@ -1,21 +1,15 @@
 [build]
 builder = "nixpacks"
-buildCommand = "NODE_ENV=development npm install --legacy-peer-deps && npm run build"
+buildCommand = "npm install --no-audit --legacy-peer-deps && npm run build"
 
 [deploy]
-startCommand = "NODE_ENV=production npm start"
-healthcheckPath = "/"
-healthcheckTimeout = 100
+startCommand = "npm start"
 restartPolicyType = "on_failure"
 
 [variables]
+NODE_ENV = "production"
 NEXT_TELEMETRY_DISABLED = "1"
+NPM_CONFIG_PRODUCTION = "false"
 
 [phases.setup]
-nixPkgs = ["nodejs", "npm"]
-
-[phases.install]
-cmds = ["npm install --legacy-peer-deps"]
-
-[phases.build]
-cmds = ["npm run build"]
+nixPkgs = ["nodejs@18", "npm"]
