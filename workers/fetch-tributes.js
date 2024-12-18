@@ -7,7 +7,7 @@ const tokenData = {
     'ibc/837E876EAB64260D5174BE8171B2889113757A8724258A855D6F8D92EDF41E9A': { ticker: 'SWTH', price: 0.002375 },
     'ibc/B6643B477C69060B125279D9FF69EC20189E4D15DC24CF0457E0BAA9DD1A26AE': { ticker: 'SHD', price: 2.59 },
     'ibc/6C9E6701AC217C0FC7D74B0F7A6265B9B4E3C3CDA6E80AADE5F950A8F52F9972': { ticker: 'NLS', price: 0.01253 },
-    'factory/neutron1ndu2wvkrxtane8se2tr48gv7nsm46y5gcqjhux/MARS': { ticker: 'MARS', price: 0.03481 },
+    'factory/neutron1ndu2wvkrxtane8se2tr48gv7nsm46y5gcqjhux/MARS': { ticker: 'MARS', price: 0.03403 },
     'ibc/3552CECB7BCE1891DB6070D37EC6E954C972B1400141308FCD85FD148BD06DE5': { ticker: 'STRD', price: 0.6984 },
     'untrn': { ticker: 'NTRN', price: 0.5484 }
 };
