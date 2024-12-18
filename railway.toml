@@ -1,22 +1,21 @@
 [build]
 builder = "nixpacks"
-buildCommand = "npm install --force && npm run build"
+buildCommand = "NODE_ENV=development npm install --legacy-peer-deps && npm run build"
 
 [deploy]
-startCommand = "npm start"
+startCommand = "NODE_ENV=production npm start"
 healthcheckPath = "/"
 healthcheckTimeout = 100
 restartPolicyType = "on_failure"
 
 [variables]
-NODE_ENV = "production"
 NEXT_TELEMETRY_DISABLED = "1"
 
 [phases.setup]
 nixPkgs = ["nodejs", "npm"]
 
 [phases.install]
-cmds = ["npm install --force"]
+cmds = ["npm install --legacy-peer-deps"]
 
 [phases.build]
 cmds = ["npm run build"]
