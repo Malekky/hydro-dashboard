@@ -62,18 +62,24 @@ async function api<T>(path: string, init: RequestInit = {}, jwt?: string): Promi
   return res.json() as Promise<T>;
 }
 
-/** EIP-4361 sign-in as the operator → Bearer JWT. */
+/** EIP-4361 sign-in as the operator → Bearer JWT.
+ *  Message format verified against Gnosis Pay's own siwe-demo-app: statement
+ *  "Sign in with Ethereum to Gnosis Pay", URI https://api.gnosispay.com/, chain 100;
+ *  the nonce endpoint returns PLAIN TEXT. The signer must be a registered Sign-In
+ *  Wallet (eoa-accounts) on the operator's account — see docs/operator-setup.md. */
 export async function authenticate(): Promise<string> {
   if (cachedJwt && cachedJwt.expiresAt > Date.now() + 60_000) return cachedJwt.token;
 
   const account = operatorAccount();
-  const { nonce } = await api<{ nonce: string }>('/api/v1/auth/nonce');
+  const nonceRes = await fetch(`${API_BASE}/api/v1/auth/nonce`);
+  if (!nonceRes.ok) throw new Error(`GnosisPay GET /api/v1/auth/nonce → ${nonceRes.status}`);
+  const nonce = (await nonceRes.text()).trim();
   const issuedAt = new Date().toISOString();
   const message =
     `${SIWE_DOMAIN} wants you to sign in with your Ethereum account:\n` +
     `${account.address}\n\n` +
-    `Sign in to Gnosis Pay.\n\n` +
-    `URI: https://${SIWE_DOMAIN}\n` +
+    `Sign in with Ethereum to Gnosis Pay\n\n` +
+    `URI: https://api.gnosispay.com/\n` +
     `Version: 1\n` +
     `Chain ID: ${gnosis.id}\n` +
     `Nonce: ${nonce}\n` +
@@ -84,7 +90,7 @@ export async function authenticate(): Promise<string> {
 
   const challenge = await api<{ token: string; ttlInSeconds?: number }>('/api/v1/auth/challenge', {
     method: 'POST',
-    body: JSON.stringify({ message, signature }),
+    body: JSON.stringify({ message, signature, ttlInSeconds: 86_400 }),
   });
   cachedJwt = {
     token: challenge.token,
