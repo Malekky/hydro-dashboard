@@ -1,47 +1,149 @@
-import type { FundingIntent, OnrampMode, PeerPlatform } from '../types';
+'use client';
+
+import {
+  Zkp2pClient,
+  createPeerExtensionSdk,
+  isPeerExtensionAvailable,
+  openPeerExtensionInstallPage,
+  type GetQuoteResponse,
+  type PeerBuyerTeePaymentCapture,
+  type PeerExtensionSdk,
+  type QuoteSingleResponse,
+} from '@zkp2p/sdk';
+import type { Hash, WalletClient } from 'viem';
+import { USDC_ADDRESS } from '../chain/usdc';
+import type { PeerPlatform } from '../types';
 
 /**
- * Peer (zkp2p) onramp adapter — docs/03-spec.md §4.1.
+ * Real Peer (zkp2p) taker flow on Base mainnet — desktop web (Chrome extension ≥0.6.0).
+ * Sequence: getQuote → signalIntent (locks maker escrow) → user pays fiat out-of-band →
+ * extension captures Buyer TEE session → fulfillIntent (attestation + on-chain release).
  *
- * Verified constraints (docs/01-research.md §2):
- *  - Web integration is desktop-Chrome only: requires the Peer extension ≥0.6.0; capture via
- *    `peer.authenticate({ captureMode: 'buyerTee' })`, then `fulfillIntent()` from @zkp2p/sdk.
- *  - There is NO extension-free mobile-web flow. Mobile v1 = handoff to Peer's native app
- *    (user onramps to their Subrail wallet address); we detect USDC arrival on Base.
- *  - v1.5 = Expo shell embedding @zkp2p/zkp2p-react-native-sdk (WebView intercept + witness).
- *  - Settlement: USDC on Base (EscrowV2 0x7777…00Ef). Register our builder-fee hook.
+ * NEXT_PUBLIC_ZKP2P_API_KEY (curator key) enables auto-fetched signalIntent gating
+ * signatures and authenticated quotes with resolved payee details. Without it the SDK
+ * still quotes, but signalIntent needs a manual gating signature — the UI surfaces that
+ * as a configuration-required state. Production should proxy this key server-side.
  */
-export interface PeerOnrampAdapter {
-  /** Quote against current maker depth for the corridor. */
-  quote(input: { platform: PeerPlatform; usd: number }): Promise<{ spreadBps: number; available: boolean }>;
-  /** Start an onramp episode appropriate to the device. */
-  start(input: { wallet: `0x${string}`; usd: number; platform?: PeerPlatform; mode: OnrampMode }): Promise<FundingIntent>;
-  /** Poll/refresh intent state (extension callback on desktop; Base Transfer watcher on mobile/external). */
-  refresh(intent: FundingIntent): Promise<FundingIntent>;
+
+const ATTESTATION_SERVICE_URL = 'https://attestation.zkp2p.xyz';
+
+/** Subrail builder fee, paid by the taker on fulfillment (25 bps). */
+const BUILDER_FEE_BPS = 25n;
+
+export function createPeerClient(walletClient: WalletClient): Zkp2pClient {
+  return new Zkp2pClient({
+    walletClient,
+    chainId: 8453,
+    runtimeEnv: 'production',
+    apiKey: process.env.NEXT_PUBLIC_ZKP2P_API_KEY || undefined,
+  });
 }
 
-export class StubPeerOnrampAdapter implements PeerOnrampAdapter {
-  async quote(input: { platform: PeerPlatform; usd: number }) {
-    // TODO(M1): read maker depth via @zkp2p/sdk + GraphQL indexer.
-    void input;
-    return { spreadBps: 100, available: true };
-  }
+export function peerExtensionReady(): boolean {
+  return isPeerExtensionAvailable();
+}
 
-  async start(input: { wallet: `0x${string}`; usd: number; platform?: PeerPlatform; mode: OnrampMode }): Promise<FundingIntent> {
-    // TODO(M1): desktop → sdk.initiateOnramp + extension authenticate; mobile/external →
-    // render wallet QR/deeplink and arm the Base USDC Transfer watcher (viem watchEvent).
-    return {
-      id: crypto.randomUUID(),
-      wallet: input.wallet,
-      mode: input.mode,
-      quotedUsd: input.usd,
-      state: 'created',
-      createdAt: new Date(),
-    };
-  }
+export { openPeerExtensionInstallPage };
 
-  async refresh(intent: FundingIntent): Promise<FundingIntent> {
-    // TODO(M1): state advancement from extension events / chain watcher.
-    return intent;
+export async function getBestOnrampQuote(
+  client: Zkp2pClient,
+  input: { platform: PeerPlatform; fiatCurrency: string; usd: number; recipient: `0x${string}` },
+): Promise<QuoteSingleResponse | null> {
+  const res: GetQuoteResponse = await client.getQuote({
+    paymentPlatforms: [input.platform],
+    fiatCurrency: input.fiatCurrency,
+    user: input.recipient,
+    recipient: input.recipient,
+    destinationChainId: 8453,
+    destinationToken: USDC_ADDRESS,
+    amount: input.usd.toFixed(2),
+    isExactFiat: true,
+  });
+  return res.responseObject?.quotes?.[0] ?? null;
+}
+
+/** Lock maker liquidity for the quoted intent. Returns the intent hash to fulfill. */
+export async function signalQuotedIntent(
+  client: Zkp2pClient,
+  quote: QuoteSingleResponse,
+  recipient: `0x${string}`,
+): Promise<Hash> {
+  const { intent } = quote;
+  const amount = BigInt(intent.amount);
+  const feeRecipient = process.env.NEXT_PUBLIC_SUBRAIL_FEE_ADDRESS as `0x${string}` | undefined;
+  return client.signalIntent({
+    depositId: BigInt(intent.depositId),
+    amount,
+    toAddress: recipient,
+    processorName: intent.processorName,
+    payeeDetails: intent.payeeDetails,
+    fiatCurrencyCode: intent.fiatCurrencyCode,
+    conversionRate: quote.conversionRate,
+    referralFees: feeRecipient
+      ? [{ recipient: feeRecipient, fee: (amount * BUILDER_FEE_BPS) / 10_000n }]
+      : undefined,
+  });
+}
+
+/**
+ * Drive the extension's Buyer TEE capture for the platform the user just paid on.
+ * Resolves with the encrypted session capture to feed into fulfillIntent.
+ */
+export async function captureBuyerPayment(platform: PeerPlatform): Promise<PeerBuyerTeePaymentCapture> {
+  const peer: PeerExtensionSdk = createPeerExtensionSdk();
+  if ((await peer.getState()) === 'needs_connection') {
+    await peer.requestConnection();
   }
+  return new Promise((resolve, reject) => {
+    const unsubscribe = peer.onMetadataMessage((message) => {
+      if (message.buyerTeeCapture) {
+        unsubscribe();
+        resolve(message.buyerTeeCapture);
+      } else if (message.errorMessage) {
+        unsubscribe();
+        reject(new Error(message.errorMessage));
+      }
+    });
+    try {
+      peer.authenticate({
+        actionType: `transfer_${platform}`,
+        captureMode: 'buyerTee',
+        platform,
+        attestationServiceUrl: ATTESTATION_SERVICE_URL,
+      });
+    } catch (e) {
+      unsubscribe();
+      reject(e);
+    }
+  });
+}
+
+/** Attest + release escrow to the buyer's wallet. Returns the fulfillment tx hash. */
+export async function fulfillWithCapture(
+  client: Zkp2pClient,
+  input: {
+    intentHash: `0x${string}`;
+    capture: PeerBuyerTeePaymentCapture;
+    platform: PeerPlatform;
+    onAttestationStart?: () => void;
+    onTxSent?: (hash: Hash) => void;
+  },
+): Promise<Hash> {
+  const params = input.capture.params?.[0];
+  if (!params) throw new Error('extension returned no payment parameters');
+  return client.fulfillIntent({
+    intentHash: input.intentHash,
+    proof: {
+      proofType: 'buyerTee',
+      encryptedSessionMaterial: input.capture.encryptedSessionMaterial,
+      params,
+      actionPlatform: input.platform,
+      actionType: `transfer_${input.platform}`,
+    },
+    attestationServiceUrl: ATTESTATION_SERVICE_URL,
+    callbacks: {
+      onAttestationStart: input.onAttestationStart,
+      onTxSent: input.onTxSent,
+    },
+  });
 }

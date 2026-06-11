@@ -22,6 +22,12 @@ Framing decisions (product owner direction, 2026-06):
 - **If a cycle fails, the user is made whole in USDC**: any funds pulled for a cycle that
   didn't deliver value are reimbursed to the same wallet the Peer onramp settled into
   (the primary leg never needs this — funds move only at successful card authorization).
+- **A1 — Base is assumed supported by Bridge's card contract.** If a program lands on a
+  different EVM chain, the app inserts a one-time bridging tx (user's USDC → that chain)
+  rather than redesigning the leg.
+- **MVP = the initial subscription.** Onboard → acquire USDC → issue card → grant a
+  one-cycle allowance → user completes claude.ai checkout once. Recurring-cycle allowance
+  choreography (§3) is designed and stubbed but ships after the MVP is nailed down.
 
 ---
 

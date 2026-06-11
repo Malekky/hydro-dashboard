@@ -30,7 +30,7 @@ sanctioned and Claude-unsupported regions.
 | `docs/01-research.md` | Research report: ~200 verified claims across Peer, x402, Tempo MPP, the USDC→Claude last leg, compliance, prior art — with an adversarial verification pass and per-path feasibility verdicts |
 | `docs/02-design.md` | Design proposal: architecture, rails router, protocol decision (x402 vs MPP), risk register, phasing |
 | `docs/03-spec.md` | Build spec for v1: stack, domain model, state machines, API, integration detail, acceptance criteria |
-| `app/` | Prototype scaffold (Next.js 15 + TypeScript): the pure core is real and tested (rails router, renewal scheduler, geo gate); integration adapters are typed stubs with TODOs that mirror the spec |
+| `app/` | MVP app (Next.js 15 + TypeScript, Base mainnet): real integrations — Coinbase Smart Wallet (passkey), `@zkp2p/sdk` taker flow (quote → signalIntent → Buyer-TEE capture → fulfillIntent), Bridge card-issuing REST client, USDC allowance approval — plus the tested pure core (rails router, renewal scheduler, geo gate). Steps requiring partner credentials (`BRIDGE_API_KEY`, Peer curator key) render explicit configuration-required states until keys exist |
 
 ## Scaffold quickstart
 
