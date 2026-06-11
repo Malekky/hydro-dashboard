@@ -1,12 +1,16 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
+import { AddressChip, Alert, Button, Skeleton } from '@/components/ui';
 import type { GnosisPayCard, GnosisPayTransaction } from '@/lib/gateway/gnosisPay';
 import type { Charge } from '@/lib/gateway/ledger';
 
+const FRIEND_LABELS_KEY = 'subrail.cardFriends';
+const MAX_ACTIVE_CARDS = 5;
+
 /**
- * Operator console — authenticated server-side as the operator (SIWE → JWT).
- * Permissionless tier has no webhooks, so this polls the transactions endpoint.
+ * Operator console — the server authenticates to Gnosis Pay as the operator (SIWE → JWT).
+ * No webhooks on the permissionless tier, so data refreshes by polling.
  */
 export default function OperatorPage() {
   const [status, setStatus] = useState<{ configured: boolean; safeAddress?: string } | null>(null);
@@ -14,8 +18,25 @@ export default function OperatorPage() {
   const [txs, setTxs] = useState<{ transactions: GnosisPayTransaction[]; claudeCharges: Charge[] } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
+  const [labels, setLabels] = useState<Record<string, string>>({});
 
-  async function load() {
+  useEffect(() => {
+    try {
+      setLabels(JSON.parse(localStorage.getItem(FRIEND_LABELS_KEY) ?? '{}'));
+    } catch {
+      setLabels({});
+    }
+  }, []);
+
+  const setLabel = (cardId: string, friend: string) => {
+    setLabels((cur) => {
+      const next = { ...cur, [cardId]: friend };
+      localStorage.setItem(FRIEND_LABELS_KEY, JSON.stringify(next));
+      return next;
+    });
+  };
+
+  const load = useCallback(async () => {
     setError(null);
     const s = await fetch('/api/gateway/status').then((r) => r.json());
     setStatus(s);
@@ -25,51 +46,74 @@ export default function OperatorPage() {
       fetch('/api/gateway/transactions').then((r) => r.json()),
     ]);
     if (c.error || t.error) {
-      setError(c.error ?? t.error);
+      setError(String(c.error ?? t.error));
       return;
     }
     setCards(c.cards);
     setTxs(t);
-  }
+  }, []);
 
   useEffect(() => {
     load().catch((e) => setError(String(e)));
     const interval = setInterval(() => load().catch(() => undefined), 30_000);
     return () => clearInterval(interval);
-  }, []);
+  }, [load]);
 
   if (status && !status.configured) {
     return (
       <main>
-        <h1>Operator console</h1>
-        <section style={{ ...card, borderColor: '#b58900' }}>
-          <p>
-            Set <code>GNOSIS_OPERATOR_PRIVATE_KEY</code> (an owner key of your Gnosis Pay
-            account — used only to sign SIWE logins) and <code>GNOSIS_SAFE_ADDRESS</code>,
-            then restart. No partnership or API key required.
+        <PageHead />
+        <section className="card">
+          <h2>Connect your Gnosis Pay account</h2>
+          <p style={{ color: 'var(--ink-2)' }}>
+            Two environment variables and you’re live — no partnership, no API key, no
+            approval process (Gnosis Pay’s permissionless tier).
           </p>
+          <ol style={{ lineHeight: 1.8, paddingLeft: '1.2rem', fontSize: '0.92rem' }}>
+            <li>
+              <code>GNOSIS_OPERATOR_PRIVATE_KEY</code> — an owner key of your account. It only
+              signs sign-in messages; it can’t move funds.
+            </li>
+            <li>
+              <code>GNOSIS_SAFE_ADDRESS</code> — your Gnosis Pay Safe, where friends’
+              contributions arrive.
+            </li>
+          </ol>
+          <p className="hint">Restart the app after setting them.</p>
         </section>
       </main>
     );
   }
 
+  const activeCards = cards?.filter((c) => c.statusCode === 1000) ?? cards ?? [];
+
   return (
     <main>
-      <h1>Operator console</h1>
+      <PageHead />
+
       {status?.safeAddress && (
-        <p style={{ fontSize: '0.9rem' }}>
-          Gateway Safe (Gnosis Chain): <code>{status.safeAddress}</code> — friends’
-          contributions land here as EURe.
-        </p>
+        <section className="card">
+          <div className="card-head">
+            <h2 style={{ margin: 0 }}>Gateway Safe</h2>
+            <span className="badge badge-ok">Connected</span>
+          </div>
+          <p className="hint" style={{ marginBottom: '0.5rem' }}>
+            Friends’ contributions land here as EURe on Gnosis Chain — instantly, with no
+            holding step. Avoid withdrawals near billing dates: cards pause for ~3 minutes
+            during withdrawal processing.
+          </p>
+          <AddressChip value={status.safeAddress} />
+        </section>
       )}
 
-      <section style={card}>
-        <h2 style={{ display: 'flex', justifyContent: 'space-between' }}>
-          Cards
-          <button
-            style={cta}
-            disabled={creating || (cards?.length ?? 0) >= 5}
-            title="Max 5 active cards per Gnosis Pay account"
+      <section className="card">
+        <div className="card-head">
+          <h2 style={{ margin: 0 }}>Cards</h2>
+          <Button
+            size="sm"
+            loading={creating}
+            disabled={(cards?.length ?? 0) >= MAX_ACTIVE_CARDS}
+            title={`Gnosis Pay allows ${MAX_ACTIVE_CARDS} active cards per account`}
             onClick={async () => {
               setCreating(true);
               try {
@@ -83,57 +127,117 @@ export default function OperatorPage() {
               }
             }}
           >
-            {creating ? 'Creating…' : '+ Virtual card'}
-          </button>
-        </h2>
-        {!cards ? <p>Loading…</p> : cards.length === 0 ? <p>No cards yet.</p> : (
-          <ul>
-            {cards.map((c) => (
-              <li key={c.id}>
-                {c.virtual !== false ? 'Virtual' : 'Physical'} •••• {c.lastFourDigits ?? '????'}
-                {c.statusCode === 1000 ? ' (active)' : ''}
-                <span style={{ color: '#666', fontSize: '0.8rem' }}> — assign to a friend; reveal PAN in the Gnosis Pay app</span>
-              </li>
-            ))}
-          </ul>
-        )}
-        <p style={{ fontSize: '0.8rem', color: '#666' }}>
-          One card per friend keeps attribution clean (account cap: 5 active cards).
-        </p>
-      </section>
+            New virtual card
+          </Button>
+        </div>
 
-      <section style={card}>
-        <h2>Claude charges</h2>
-        {!txs ? <p>Loading…</p> : txs.claudeCharges.length === 0 ? (
-          <p>No Anthropic charges detected yet.</p>
+        {!cards ? (
+          <div style={{ display: 'grid', gap: '0.5rem' }}>
+            <Skeleton height="2.4rem" />
+            <Skeleton height="2.4rem" />
+          </div>
+        ) : cards.length === 0 ? (
+          <div className="empty">
+            No cards yet. Create one per friend, then add it to their claude.ai account —
+            reveal the card number in your Gnosis Pay app.
+          </div>
         ) : (
-          <table style={{ width: '100%', fontSize: '0.9rem' }}>
-            <thead><tr><th align="left">When</th><th align="left">Merchant</th><th align="right">USD</th></tr></thead>
+          <table className="table">
+            <thead>
+              <tr>
+                <th>Card</th>
+                <th>Status</th>
+                <th>Friend</th>
+              </tr>
+            </thead>
             <tbody>
-              {txs.claudeCharges.map((ch, i) => (
-                <tr key={i}>
-                  <td>{new Date(ch.at).toLocaleString()}</td>
-                  <td>{ch.merchant}</td>
-                  <td align="right">${ch.usd.toFixed(2)}</td>
+              {cards.map((c) => (
+                <tr key={c.id}>
+                  <td style={{ fontFamily: 'var(--font-mono)' }}>•••• {c.lastFourDigits ?? '— — — —'}</td>
+                  <td>
+                    {c.statusCode === 1000
+                      ? <span className="badge badge-ok">Active</span>
+                      : <span className="badge badge-neutral">{c.statusCode ?? '—'}</span>}
+                  </td>
+                  <td>
+                    <input
+                      className="input"
+                      style={{ maxWidth: '11rem', padding: '0.3rem 0.5rem', fontSize: '0.85rem' }}
+                      placeholder="Assign a friend"
+                      value={labels[c.id] ?? ''}
+                      onChange={(e) => setLabel(c.id, e.target.value)}
+                    />
+                  </td>
                 </tr>
               ))}
             </tbody>
           </table>
         )}
-        <p style={{ fontSize: '0.8rem', color: '#666' }}>
-          Polled every 30s (webhooks are partner-gated). All transactions: {txs?.transactions.length ?? '—'}.
+        <p className="hint" style={{ marginTop: '0.6rem' }}>
+          {activeCards.length}/{MAX_ACTIVE_CARDS} active cards used. One card per friend keeps
+          charges cleanly attributed.
         </p>
       </section>
 
-      {error && <p style={{ color: '#8a1f11' }}>{error}</p>}
+      <section className="card">
+        <div className="card-head">
+          <h2 style={{ margin: 0 }}>Claude charges</h2>
+          <span className="badge badge-neutral">refreshes every 30s</span>
+        </div>
+        {!txs ? (
+          <div style={{ display: 'grid', gap: '0.5rem' }}>
+            <Skeleton height="2rem" />
+            <Skeleton height="2rem" />
+            <Skeleton height="2rem" />
+          </div>
+        ) : txs.claudeCharges.length === 0 ? (
+          <div className="empty">
+            No Anthropic charges yet. Once a card is on a friend’s claude.ai account, their
+            monthly charge shows up here automatically.
+          </div>
+        ) : (
+          <table className="table">
+            <thead>
+              <tr>
+                <th>When</th>
+                <th>Merchant</th>
+                <th>Friend</th>
+                <th style={{ textAlign: 'right' }}>Amount</th>
+              </tr>
+            </thead>
+            <tbody>
+              {txs.claudeCharges.map((ch, i) => (
+                <tr key={i}>
+                  <td>{new Date(ch.at).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}</td>
+                  <td>{ch.merchant}</td>
+                  <td>{(ch.cardToken && labels[ch.cardToken]) || <span className="hint">—</span>}</td>
+                  <td className="num">${ch.usd.toFixed(2)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+        {txs && (
+          <p className="hint" style={{ marginTop: '0.6rem' }}>
+            {txs.transactions.length} total card transaction{txs.transactions.length === 1 ? '' : 's'} in
+            the recent window.
+          </p>
+        )}
+      </section>
+
+      {error && <Alert kind="err">{error}</Alert>}
     </main>
   );
 }
 
-const card: React.CSSProperties = {
-  border: '1px solid #ddd', borderRadius: 8, padding: '1rem', marginBlock: '1rem', background: '#fff',
-};
-const cta: React.CSSProperties = {
-  background: '#2f6f4f', color: '#fff', border: 'none', borderRadius: 6,
-  padding: '0.4rem 0.9rem', cursor: 'pointer', fontSize: '0.85rem',
-};
+function PageHead() {
+  return (
+    <div style={{ padding: '1.6rem 0 0.25rem' }}>
+      <h1>Operator console</h1>
+      <p style={{ color: 'var(--ink-2)' }}>
+        Your gateway at a glance: the Safe your friends fund, the cards that pay their
+        subscriptions, and every Claude charge as it lands.
+      </p>
+    </div>
+  );
+}
