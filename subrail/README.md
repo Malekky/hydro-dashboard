@@ -35,14 +35,31 @@ failed cycles reimburse USDC to the friend's wallet.
 | `docs/03-spec.md` | Build spec for v1: stack, domain model, state machines, API, integration detail, acceptance criteria |
 | `app/` | MVP app (Next.js 15 + TypeScript, Base mainnet): real integrations — Coinbase Smart Wallet (passkey), `@zkp2p/sdk` taker flow (quote → signalIntent → Buyer-TEE capture → fulfillIntent), Bridge card-issuing REST client, USDC allowance approval — plus the tested pure core (rails router, renewal scheduler, geo gate). Steps requiring partner credentials (`BRIDGE_API_KEY`, Peer curator key) render explicit configuration-required states until keys exist |
 
-## Scaffold quickstart
+## Local deployment (one shot)
 
 ```bash
 cd app
-pnpm install   # or npm install
-pnpm test      # vitest: router, scheduler, geo gate
-pnpm dev       # landing + POST /api/quote
+cp .env.example .env.local   # fill keys as you get them — empty keys still run
+pnpm install && pnpm test && pnpm build && pnpm start
+# → http://localhost:3000        friend flow (picker → wallet → fund → contribute)
+# → http://localhost:3000/operator   your console (cards, Safe, Claude charges)
 ```
+
+What works with **no keys**: picker + rail routing, passkey smart-wallet creation
+(Base mainnet), Peer quotes, direct USDC deposit detection, all pages; gateway/Peer
+steps render explicit "configure key" states.
+
+Keys to fill in `.env.local` (never committed):
+
+| Key | Unlocks | Where |
+|---|---|---|
+| `GNOSIS_OPERATOR_PRIVATE_KEY` + `GNOSIS_SAFE_ADDRESS` | operator console, friend contributions (LI.FI → your Safe), card creation | an owner key of your Gnosis Pay account (signs SIWE logins only) |
+| `NEXT_PUBLIC_ZKP2P_API_KEY` | auto gating signatures on Peer `signalIntent` | zkp2p curator key (in progress) |
+| `NEXT_PUBLIC_SUBRAIL_FEE_ADDRESS` | 25 bps builder fee on Peer fulfillments | any address you control |
+
+The Peer extension flow needs desktop Chrome with the Peer extension ≥0.6.0; `localhost`
+is auto-allowed for Gnosis Pay SIWE (register a real domain free at partners.gnosispay.com
+when you host it).
 
 Try a quote:
 
