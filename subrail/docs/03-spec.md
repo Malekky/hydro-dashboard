@@ -14,13 +14,14 @@ Implements `02-design.md`. Scope: M1 (v1 PWA) with M2 interfaces stubbed. The sc
 | Wallet | Coinbase Smart Wallet SDK (passkey ERC-4337) via wagmi/viem | Passkey UX, paymaster gas sponsorship, native Spend Permissions |
 | Onramp | `@zkp2p/sdk` ≥0.5.0 (+ `/react`), `@zkp2p/contracts-v2` | Headless desktop flow; mobile handoff v1; RN SDK in v1.5 |
 | Payments | x402 (`exact` scheme, Base USDC) for Subrail's service fee; amount-bounded USDC allowance management for the card leg; Coinbase Spend Permissions for fallback-leg pulls | See D1 |
-| Payment legs | **Primary: Bridge (Stripe Issuing) JIT card** (`legs/bridgeCard.ts`); fallbacks: Bitrefill Business API (app-store), operator gift-code service (`FEATURE_LEG_B`) | See D2/§3 of design |
+| Payment legs | **Primary: Gnosis Pay gateway** (`gateway/*` — SIWE-authed operator API client, LI.FI funding route, friend ledger); fallbacks: Bitrefill Business API (app-store), operator gift-code service (`FEATURE_LEG_B`) | See D2/§3 of design |
 | Persistence | Postgres (Neon/Supabase) + Drizzle ORM | Renewal jobs need durable state + locks |
 | Jobs | Vercel Cron → `/api/renewals/tick` (idempotent); upgradeable to Temporal in M2 | Renewals are minute-granular, not ms |
 | Telemetry | OpenTelemetry + PostHog (no PII beyond country) | |
 
 Env (`.env.example`): `DATABASE_URL`, `BASE_RPC_URL`, `PAYMASTER_URL`, `SPENDER_PRIVATE_KEY`
-(renewal service signer — KMS in prod), `BRIDGE_API_KEY`, `BITREFILL_API_KEY`,
+(renewal service signer — KMS in prod), `GNOSIS_OPERATOR_PRIVATE_KEY`,
+`GNOSIS_SAFE_ADDRESS`, `GNOSISPAY_SIWE_DOMAIN`, `BITREFILL_API_KEY`,
 `X402_FACILITATOR_URL`, `GEOIP_DB_PATH`, `FEATURE_LEG_B=false`,
 `FEATURE_AUTONOMOUS_RENEWALS=false`.
 
@@ -46,7 +47,9 @@ subrail/app/
       pay/x402.ts             # minimal exact-scheme client+server helpers
       pay/mpp.ts              # PaymentRail adapter stub (phase 2)
       legs/types.ts           # LastLeg interface
-      legs/bridgeCard.ts      # PRIMARY: Bridge JIT card (allowance choreography)
+      gateway/gnosisPay.ts    # PRIMARY: SIWE→JWT operator client (cards, transactions)
+      gateway/funding.ts      # LI.FI route: friend's Base USDC → EURe in operator Safe
+      gateway/ledger.ts       # pure friend ledger (contributions − attributed charges)
       legs/bitrefill.ts       # fallback 1: app-store gift cards (Bitrefill API)
       legs/claudeGift.ts      # fallback 2: official Claude gift codes (feature-flagged)
       renewal/scheduler.ts    # pure state machine: RenewalJob transitions
@@ -60,7 +63,7 @@ subrail/app/
 // src/lib/types.ts (authoritative; excerpted)
 type Country = ISO3166Alpha2;
 type ClaudePlan = 'pro' | 'max5x' | 'max20x';
-type LegKind = 'appstore_giftcard' | 'claude_gift_code' | 'virtual_card';
+type LegKind = 'appstore_giftcard' | 'claude_gift_code' | 'gateway_card';
 type OnrampMode = 'peer_desktop_ext' | 'peer_app_handoff' | 'external_deposit';
 
 interface RailQuoteRequest { country: Country; plan: ClaudePlan;
@@ -128,24 +131,31 @@ source + Subrail fee address. UI shows the grant in plain language + a working r
 (on-chain revocation, verified in e2e tests). The renewal signer is a dedicated key (KMS) that
 can do nothing but execute permitted pulls.
 
-### 4.3 Primary leg — `legs/bridgeCard.ts` (USDC → Stripe via Bridge JIT card)
+### 4.3 Primary leg — `gateway/*` (Gnosis Pay gateway, permissionless tier)
 
-Setup (once per user): Bridge customer + KYC → virtual Visa in the user's name → user grants
-an amount-bounded USDC approval to the developer-scoped Bridge delegate → user enters the
-card at claude.ai checkout (guided in-app; we never touch Anthropic credentials).
+Operator setup (once): normal Gnosis Pay signup/KYC → set `GNOSIS_OPERATOR_PRIVATE_KEY`
+(an owner key, used only to sign SIWE logins) + `GNOSIS_SAFE_ADDRESS` → create one free
+virtual card per friend (`POST /api/v1/cards/virtual`, 5-active cap) in `/operator` →
+put each card on the friend's claude.ai account (PAN revealed in the Gnosis Pay app —
+PSE display is partner-gated).
 
-Renewal choreography per cycle (design §3): at `T−24h` before the estimated billing date,
-raise the allowance to `face × (1 + bufferBps)`; Anthropic's MIT charge triggers Bridge's
-JIT pull from the user's wallet at authorization; on the settled-auth webhook the job goes
-`confirmed`; after the Stripe Smart-Retries window, lower the allowance toward zero. Billing
-date estimate is user-entered at setup and tightened from auth webhooks each cycle.
+Friend contribution (per top-up): `/api/gateway/funding-quote` fetches the LI.FI route
+Base USDC → Gnosis EURe with `toAddress` = the operator Safe; the friend's wallet approves
+USDC (if required) and sends the route transaction. Deposits are plain ERC-20 transfers —
+instant, no Delay-module interaction. EEA Safes spend EURe only; never deliver USDC.e.
 
-Failure handling: declines inside the retry window → keep window open, top-up nudge;
-terminal decline → fallback-leg selection surfaced to the user. No reimbursement applies on
-this leg (funds move only at successful authorization).
+Reconciliation (no webhooks on the permissionless tier): poll
+`GET /api/v1/cards/transactions`; `ledger.isClaudeCharge` filters Anthropic merchants;
+`computeStandings` nets contributions against charges (cardToken→friend mapping when
+cards are per-friend, pro-rata otherwise) and reports months of runway per friend.
 
-M0 spikes gate production: Bridge program approval (KYB), explicit Base chain confirmation,
-and a 3-cycle live pilot measuring MIT auth behavior incl. one deliberate allowance miss.
+Operational rules: don't withdraw or change limits near billing dates (cards freeze ~3
+minutes during Delay-relay operations); keep the Safe topped ahead of known billing dates;
+declines surface in the transactions feed as `InsufficientFunds`.
+
+M0 spikes: live SIWE auth against api.gnosispay.com with the operator key; one real LI.FI
+contribution Base→Safe; one real claude.ai charge on a fresh virtual card; verify the
+transactions endpoint shows it with usable merchant/amount fields.
 
 ### 4.4 Fallback 1 — `legs/bitrefill.ts`
 Bitrefill Business API: maintain a small operator balance OR pay per-invoice; **preferred:
@@ -172,7 +182,7 @@ keeps fee collection auditable and separate from principal flows.
 
 ### 4.7 Compliance — `compliance/geo.ts`
 Scope per design D5: geo-blocking + disclosures; everything else is carried by the regulated
-stack (RTPNs on the fiat side, Bridge/Kulipa KYC on the card side, Bitrefill as MoR).
+stack (RTPNs on the fiat side, Gnosis Pay/Monavate KYC on the operator, Bitrefill as MoR).
 Every session AND every state-mutating API call: GeoIP country →
 `blockedCountries = OFAC_COMPREHENSIVE ∪ ANTHROPIC_UNSUPPORTED` → hard block + logged event.
 VPN/proxy heuristic score → step-up friction. Disclosure acceptance (per `DisclosureId`)
@@ -209,18 +219,18 @@ recorded with timestamp pre-onramp. No PII beyond email + country lives in Subra
   rules — incl. "never 1-month gift codes", "no card issuer → fallback"); scheduler
   transitions (idempotent tick, backoff, expiry-boundary rule, reimbursement emission); geo
   gate.
-- **Integration:** Base Sepolia: allowance raise/lower + spend-permission grant → pull →
-  revoke; x402 402→settle against CDP facilitator sandbox; Bridge sandbox card issuance;
+- **Integration:** live SIWE auth against api.gnosispay.com (operator key); LI.FI quote
+  fetch for Base USDC → Gnosis EURe; x402 402→settle against CDP facilitator sandbox;
   Bitrefill sandbox/test products.
-- **E2E pilots (M0, manual — these gate the build):** Bridge card on a live Claude Pro
-  subscription for 3 cycles incl. one deliberate allowance-miss + recovery; Peer desktop +
-  app-handoff onramps at $25 and $120 tickets; AR/BR/IN/US Apple-balance auto-renew
-  (fallback 1); 3-month gift code redeem + expiry-boundary renewal (fallback 2).
-- **Acceptance for M1 launch:** a new user in a Bridge-covered corridor (US/AR) completes
-  picker → wallet → Peer funding → card setup → active Claude Pro in <30 min with ≤2
-  support touches; a renewal cycle completes via the allowance choreography; a forced
-  failure reimburses USDC to the user's wallet in <1h; allowance revocation works;
-  blocked-country access is impossible by IP and by declared country; disclosures recorded.
+- **E2E pilots (M0, manual — these gate the build):** one real friend contribution
+  (Peer onramp → LI.FI route → EURe lands in the Safe); one real claude.ai charge on a
+  fresh virtual card, visible via the transactions endpoint; Peer desktop + app-handoff
+  onramps at $25 and $120 tickets; Apple-balance auto-renew pilot (fallback 1).
+- **Acceptance for M1 launch:** a friend completes picker → wallet → Peer funding →
+  contribution in <30 min with ≤2 support touches; the operator console shows the
+  contribution-funded Safe, per-friend cards, and detected Claude charges; a failed leg
+  reimburses USDC to the friend's wallet in <1h; blocked-country access is impossible by
+  IP and by declared country; disclosures (incl. gateway_operator) recorded.
 
 ## 8. Deferred (M2/M3 hooks present in code)
 

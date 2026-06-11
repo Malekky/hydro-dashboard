@@ -4,7 +4,7 @@ import { Suspense, useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { erc20Abi, formatUnits, type Hash } from 'viem';
 import {
-  useAccount, useConnect, useDisconnect, useReadContract, useWalletClient, useWriteContract,
+  useAccount, useConnect, useReadContract, useSendTransaction, useWalletClient, useWriteContract,
 } from 'wagmi';
 import {
   captureBuyerPayment, createPeerClient, fulfillWithCapture, getBestOnrampQuote,
@@ -12,6 +12,7 @@ import {
 } from '@/lib/onramp/peer';
 import { USDC_ADDRESS, USDC_DECIMALS, usdToUnits } from '@/lib/chain/usdc';
 import { PLAN_FACE_USD, type ClaudePlan, type PeerPlatform } from '@/lib/types';
+import type { FundingQuote } from '@/lib/gateway/funding';
 import type { QuoteSingleResponse } from '@zkp2p/sdk';
 
 export default function OnboardingPage() {
@@ -27,8 +28,8 @@ function Onboarding() {
   const plan = (params.get('plan') ?? 'pro') as ClaudePlan;
   const platform = (params.get('platform') || null) as PeerPlatform | null;
   const faceUsd = PLAN_FACE_USD[plan] ?? 20;
-  /** One cycle + 5% headroom for spreads/fees at auth time. */
-  const targetUsd = Math.ceil(faceUsd * 1.05 * 100) / 100;
+  /** One cycle + 5% headroom for bridge/swap + FX drag. */
+  const cycleUsd = Math.ceil(faceUsd * 1.05 * 100) / 100;
 
   const { address, isConnected } = useAccount();
   const balance = useReadContract({
@@ -39,32 +40,30 @@ function Onboarding() {
     query: { enabled: Boolean(address), refetchInterval: 5_000 },
   });
   const balanceUsd = balance.data !== undefined ? Number(formatUnits(balance.data, USDC_DECIMALS)) : 0;
-  const funded = balanceUsd >= targetUsd;
+  const funded = balanceUsd >= cycleUsd;
 
-  const [cardDone, setCardDone] = useState(false);
-  const [subscribed, setSubscribed] = useState(false);
+  const [contributed, setContributed] = useState(false);
 
-  const step = !isConnected ? 0 : !funded ? 1 : !cardDone ? 2 : !subscribed ? 3 : 4;
+  const step = !isConnected ? 0 : !funded && !contributed ? 1 : !contributed ? 2 : 3;
 
   return (
     <main>
-      <h1 style={{ fontSize: '1.4rem' }}>Set up Claude {plan} — ${faceUsd}/mo</h1>
+      <h1 style={{ fontSize: '1.4rem' }}>Claude {plan} via the gateway — ${faceUsd}/mo</h1>
       <Stepper step={step} />
       {step === 0 && <ConnectStep />}
       {step === 1 && address && (
-        <FundStep wallet={address} platform={platform} targetUsd={targetUsd} balanceUsd={balanceUsd} />
+        <FundStep wallet={address} platform={platform} targetUsd={cycleUsd} balanceUsd={balanceUsd} />
       )}
       {step === 2 && address && (
-        <CardStep wallet={address} cycleUsd={targetUsd} onDone={() => setCardDone(true)} />
+        <ContributeStep wallet={address} cycleUsd={cycleUsd} balanceUsd={balanceUsd} onDone={() => setContributed(true)} />
       )}
-      {step === 3 && <SubscribeStep onDone={() => setSubscribed(true)} />}
-      {step === 4 && (
+      {step === 3 && (
         <section style={card}>
-          <h2>You’re subscribed 🎉</h2>
+          <h2>You’re covered 🎉</h2>
           <p>
-            Your card pulls USDC from your wallet only when Anthropic charges it. Keep
-            ≈${targetUsd.toFixed(2)} in the wallet around your billing date. Renewal
-            automation ships next.
+            Your contribution is on its way to the gateway. Your operator’s card keeps your
+            claude.ai subscription paid — they’ll confirm your plan is active. Come back
+            anytime to top up more months.
           </p>
         </section>
       )}
@@ -73,7 +72,7 @@ function Onboarding() {
 }
 
 function Stepper({ step }: { step: number }) {
-  const labels = ['Wallet', 'Fund', 'Card', 'Subscribe'];
+  const labels = ['Wallet', 'Fund', 'Contribute', 'Done'];
   return (
     <ol style={{ display: 'flex', gap: '1rem', listStyle: 'none', padding: 0, fontSize: '0.85rem' }}>
       {labels.map((l, i) => (
@@ -91,7 +90,7 @@ function ConnectStep() {
   return (
     <section style={card}>
       <h2>Create your wallet</h2>
-      <p>A passkey smart wallet on Base — no seed phrase. Your funds stay yours.</p>
+      <p>A passkey smart wallet on Base — no seed phrase. Your funds stay yours until you contribute.</p>
       <button style={cta} disabled={isPending || !coinbase} onClick={() => coinbase && connect({ connector: coinbase })}>
         {isPending ? 'Opening passkey…' : 'Create / connect smart wallet'}
       </button>
@@ -132,6 +131,7 @@ function FundStep({ wallet, platform, targetUsd, balanceUsd }: {
       <h2>Fund your wallet</h2>
       <p>
         Balance: <strong>${balanceUsd.toFixed(2)}</strong> · needed: <strong>${targetUsd.toFixed(2)}</strong> USDC
+        <span style={{ color: '#666' }}> (fund several months at once to contribute them in one go)</span>
       </p>
 
       {platform && (
@@ -212,51 +212,45 @@ function FundStep({ wallet, platform, targetUsd, balanceUsd }: {
   );
 }
 
-function CardStep({ wallet, cycleUsd, onDone }: {
-  wallet: `0x${string}`; cycleUsd: number; onDone: () => void;
+function ContributeStep({ wallet, cycleUsd, balanceUsd, onDone }: {
+  wallet: `0x${string}`; cycleUsd: number; balanceUsd: number; onDone: () => void;
 }) {
-  const [fullName, setFullName] = useState('');
-  const [email, setEmail] = useState('');
-  const [kyc, setKyc] = useState<{ customerId: string; kycLink: string } | null>(null);
-  const [kycStatus, setKycStatus] = useState<string>('pending');
-  const [cardAccount, setCardAccount] = useState<{
-    cardAccountId: string; fundingDelegateAddress?: `0x${string}`; cardDetails?: { last4?: string };
-  } | null>(null);
+  const [months, setMonths] = useState(1);
+  const [gateway, setGateway] = useState<{ configured: boolean; safeAddress?: string } | null>(null);
+  const [quote, setQuote] = useState<FundingQuote | null>(null);
+  const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [notConfigured, setNotConfigured] = useState(false);
-  const { writeContractAsync, isPending: approving } = useWriteContract();
+  const { writeContractAsync } = useWriteContract();
+  const { sendTransactionAsync } = useSendTransaction();
+
+  const usd = Math.min(Math.round(cycleUsd * months * 100) / 100, Math.floor(balanceUsd * 100) / 100);
+  const enough = balanceUsd >= cycleUsd * months;
 
   useEffect(() => {
-    if (!kyc || kycStatus === 'approved') return;
-    const t = setInterval(async () => {
-      const res = await fetch(`/api/bridge/customers?customerId=${kyc.customerId}`);
-      if (res.ok) setKycStatus((await res.json()).status);
-    }, 5_000);
-    return () => clearInterval(t);
-  }, [kyc, kycStatus]);
+    fetch('/api/gateway/status').then(async (r) => setGateway(await r.json())).catch(() => setGateway({ configured: false }));
+  }, []);
 
-  async function post(path: string, body: unknown) {
-    const res = await fetch(path, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    if (res.status === 503) {
-      setNotConfigured(true);
-      throw new Error('bridge_not_configured');
+  async function run(label: string, fn: () => Promise<void>) {
+    setError(null);
+    setStatus(label);
+    try {
+      await fn();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setStatus(null);
     }
-    if (!res.ok) throw new Error(`${path}: ${await res.text()}`);
-    return res.json();
   }
 
-  if (notConfigured) {
+  if (gateway && !gateway.configured) {
     return (
       <section style={{ ...card, borderColor: '#b58900' }}>
-        <h2>Card issuing not configured</h2>
+        <h2>Gateway not configured</h2>
         <p>
-          The Bridge card program requires <code>BRIDGE_API_KEY</code> (program/KYB approval —
-          apidocs.bridge.xyz). Set it and restart. Fallback rails (app-store gift card / Claude
-          gift code) cover the meantime.
+          The operator hasn’t connected their Gnosis Pay account yet
+          (<code>GNOSIS_OPERATOR_PRIVATE_KEY</code> + <code>GNOSIS_SAFE_ADDRESS</code>).
+          No partnership needed — the permissionless tier works with the operator’s own
+          SIWE key (docs.gnosispay.com/integration-model).
         </p>
       </section>
     );
@@ -264,91 +258,69 @@ function CardStep({ wallet, cycleUsd, onDone }: {
 
   return (
     <section style={card}>
-      <h2>Get your card</h2>
+      <h2>Contribute to the gateway</h2>
       <p style={{ fontSize: '0.9rem' }}>
-        A virtual Visa in <em>your</em> name that pulls USDC from <em>your</em> wallet only when
-        charged. Issued by Bridge (a Stripe company) after a quick identity check.
+        Your USDC routes to the operator’s Gnosis Pay Safe as EURe (one transaction, via
+        LI.FI). Their card then keeps your claude.ai subscription paid. You’re trusting
+        your operator — that’s the deal among friends.
       </p>
+      <label style={row}>
+        Months to cover
+        <select value={months} onChange={(e) => { setMonths(Number(e.target.value)); setQuote(null); }}>
+          {[1, 3, 6].map((m) => <option key={m} value={m}>{m} month{m > 1 ? 's' : ''} (${(cycleUsd * m).toFixed(2)})</option>)}
+        </select>
+      </label>
+      {!enough && <p style={err}>Balance covers {Math.floor(balanceUsd / cycleUsd)} month(s) — top up or pick fewer months.</p>}
 
-      {!kyc ? (
-        <>
-          <label style={row}>Full legal name <input value={fullName} onChange={(e) => setFullName(e.target.value)} /></label>
-          <label style={row}>Email <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} /></label>
-          <button
-            style={cta}
-            disabled={fullName.length < 2 || !email.includes('@')}
-            onClick={async () => {
-              try { setKyc(await post('/api/bridge/customers', { fullName, email })); }
-              catch (e) { if (!(e instanceof Error && e.message === 'bridge_not_configured')) setError(String(e)); }
-            }}
-          >
-            Start identity check
-          </button>
-        </>
-      ) : kycStatus !== 'approved' ? (
-        <>
-          <p>Complete verification with Bridge (opens in a new tab):</p>
-          <a href={kyc.kycLink} target="_blank" rel="noreferrer" style={{ ...cta, display: 'inline-block', textDecoration: 'none' }}>
-            Open verification →
-          </a>
-          <p style={{ fontSize: '0.85rem', color: '#666' }}>Status: {kycStatus} (checking automatically)</p>
-        </>
-      ) : !cardAccount ? (
+      {!quote ? (
         <button
           style={cta}
-          onClick={async () => {
-            try {
-              setCardAccount(await post('/api/bridge/cards', { customerId: kyc.customerId, walletAddress: wallet }));
-            } catch (e) { if (!(e instanceof Error && e.message === 'bridge_not_configured')) setError(String(e)); }
-          }}
+          disabled={!gateway?.configured || !enough || status !== null}
+          onClick={() => run('Routing Base USDC → Gnosis EURe…', async () => {
+            const res = await fetch('/api/gateway/funding-quote', {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ friendWallet: wallet, usd }),
+            });
+            if (!res.ok) throw new Error((await res.json()).error ?? `quote failed (${res.status})`);
+            setQuote(await res.json());
+          })}
         >
-          Issue my virtual card
+          Get route
         </button>
       ) : (
         <>
-          <p>Card issued{cardAccount.cardDetails?.last4 ? ` (•••• ${cardAccount.cardDetails.last4})` : ''}. Last step: allow it to
-            pull up to <strong>${cycleUsd.toFixed(2)}</strong> USDC from your wallet when charged.</p>
-          {cardAccount.fundingDelegateAddress ? (
-            <button
-              style={cta}
-              disabled={approving}
-              onClick={async () => {
-                try {
-                  await writeContractAsync({
-                    address: USDC_ADDRESS,
-                    abi: erc20Abi,
-                    functionName: 'approve',
-                    args: [cardAccount.fundingDelegateAddress!, usdToUnits(cycleUsd)],
-                  });
-                  onDone();
-                } catch (e) { setError(e instanceof Error ? e.message : String(e)); }
-              }}
-            >
-              {approving ? 'Confirm in wallet…' : `Approve $${cycleUsd.toFixed(2)} allowance`}
-            </button>
-          ) : (
-            <p style={err}>
-              Bridge did not return a funding delegate address — verify the card_accounts
-              response shape against apidocs.bridge.xyz for this program.
-            </p>
-          )}
+          <p style={{ fontSize: '0.9rem' }}>
+            ${usd.toFixed(2)} USDC → ≈{(Number(quote.estimatedEure) / 1e18).toFixed(2)} EURe
+            {quote.toolName ? ` via ${quote.toolName}` : ''}, delivered straight to the Safe.
+          </p>
+          <button
+            style={cta}
+            disabled={status !== null}
+            onClick={() => run('Confirm in wallet…', async () => {
+              if (quote.approvalAddress) {
+                await writeContractAsync({
+                  address: USDC_ADDRESS,
+                  abi: erc20Abi,
+                  functionName: 'approve',
+                  args: [quote.approvalAddress, usdToUnits(usd)],
+                });
+              }
+              await sendTransactionAsync({
+                to: quote.transactionRequest.to,
+                data: quote.transactionRequest.data,
+                value: quote.transactionRequest.value ? BigInt(quote.transactionRequest.value) : undefined,
+              });
+              onDone();
+            })}
+          >
+            {quote.approvalAddress ? 'Approve & contribute' : 'Contribute'}
+          </button>
         </>
       )}
-      {error && <p style={err}>{error}</p>}
-    </section>
-  );
-}
 
-function SubscribeStep({ onDone }: { onDone: () => void }) {
-  return (
-    <section style={card}>
-      <h2>Subscribe on claude.ai</h2>
-      <ol style={{ lineHeight: 1.7 }}>
-        <li>Open <a href="https://claude.ai/upgrade" target="_blank" rel="noreferrer">claude.ai/upgrade</a> and sign in to <em>your</em> account.</li>
-        <li>Pick your plan and enter your new virtual card at checkout (use your verified name and address).</li>
-        <li>The charge pulls USDC from your wallet at that moment — nothing is prepaid.</li>
-      </ol>
-      <button style={cta} onClick={onDone}>I’m subscribed ✓</button>
+      {status && <p>{status}</p>}
+      {error && <p style={err}>{error}</p>}
     </section>
   );
 }

@@ -101,7 +101,7 @@ export default function Landing() {
         <section key={q.id} style={{ ...card, borderColor: i === 0 ? '#2f6f4f' : '#ddd' }}>
           <strong>
             {i === 0 ? 'Recommended: ' : 'Fallback: '}
-            {q.leg === 'virtual_card' && 'USDC card → pay claude.ai directly'}
+            {q.leg === 'gateway_card' && 'Gateway: your USDC funds the operator’s card → pays claude.ai'}
             {q.leg === 'appstore_giftcard' && 'App-store gift card → Claude in-app subscription'}
             {q.leg === 'claude_gift_code' && 'Official Claude gift code'}
           </strong>

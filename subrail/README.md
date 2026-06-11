@@ -9,19 +9,22 @@ payments infrastructure into one app:
 1. **Peer (zkp2p)** — the way to acquire stables: the user pays a maker on a payment network
    they already use and receives USDC in **their own** passkey smart wallet on Base. (Any
    other USDC deposit works too — USDC is simply the instrument their local currency can't be.)
-2. **An agentic renewal service** that interacts with Stripe composably:
-   - **Primary — USDC → Stripe directly:** a JIT-funded virtual Visa in the user's name
-     (Bridge via Stripe Issuing): the wallet grants an amount-bounded USDC allowance, the
-     card pulls funds **at authorization**, and claude.ai's recurring Stripe charge just
-     works against an ordinary card-on-file. Allowance ≈ $0 between cycles.
-   - **Fallback 1:** USDC → Bitrefill (merchant of record) → Apple/Google gift card →
-     app-store balance → Claude in-app subscription auto-renews.
-   - **Fallback 2:** USDC → official Claude gift-subscription code (claude.ai/gift).
+2. **The gateway** — the operator's own Gnosis Pay account, integrated via the
+   **permissionless tier** (SIWE → JWT, no partnership, no API key):
+   - Friends' Base USDC routes in one LI.FI transaction to **EURe in the operator's
+     Gnosis Pay Safe** (deposits are plain ERC-20 transfers — instant, permissionless).
+   - The operator's free **virtual cards** (one per friend, 5-card account cap) sit on the
+     friends' claude.ai accounts as ordinary Visa card-on-file; EUR→USD at Visa wholesale
+     FX, 0% Gnosis Pay fee.
+   - Reconciliation by polling `GET /api/v1/cards/transactions`; the friend ledger
+     (contributions − attributed Claude charges) is pure, tested code.
+   - **Fallbacks:** Bitrefill → Apple/Google gift card → app-store balance; official
+     Claude gift codes (claude.ai/gift).
 
-Non-custodial by construction: user principal moves wallet → merchant directly and never
-transits Subrail; failed cycles reimburse USDC back to the user's onramp wallet. Compliance
-is carried by the regulated stack (RTPNs, issuers, MoRs); Subrail enforces geo-blocking for
-sanctioned and Claude-unsupported regions.
+This automates an existing friends arrangement (the operator already pays their subs) —
+Gnosis Pay's card is personal-use-only by ToS, so it stays a friends circle, not a public
+product. Subrail enforces geo-blocking for sanctioned and Claude-unsupported regions;
+failed cycles reimburse USDC to the friend's wallet.
 
 ## This directory
 

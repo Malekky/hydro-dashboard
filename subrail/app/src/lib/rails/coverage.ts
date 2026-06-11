@@ -66,16 +66,6 @@ export const APPLE_GIFTCARD_COUNTRIES: ReadonlySet<Country> = new Set([
   'DK', 'FI', 'NO', 'CH', 'CA', 'AU', 'NZ', 'JP', 'BR', 'MX', 'TR', 'IN', 'SA', 'AE',
 ]);
 
-/**
- * Phase-2 virtual-card issuance coverage (user-named consumer cards).
- * bridge: live 18 countries 2026-03, LatAm-led (AR CO EC MX PE CL US confirmed at launch).
- * kulipa: NG + AR + EU confirmed. None: IN/PK/BD (market-wide gap).
- */
-export const CARD_ISSUER_COVERAGE: Record<'bridge' | 'kulipa', ReadonlySet<Country>> = {
-  bridge: new Set(['US', 'AR', 'CO', 'EC', 'MX', 'PE', 'CL']),
-  kulipa: new Set(['NG', 'AR', 'FR', 'DE', 'ES', 'IT', 'NL', 'BE', 'PT', 'IE', 'AT']),
-};
-
 export function peerPlatformsFor(country: Country): PeerPlatform[] {
   const out: PeerPlatform[] = [];
   for (const [platform, reach] of Object.entries(PEER_PLATFORM_REACH) as

@@ -4,20 +4,19 @@ import {
   type PeerPlatform, type RailPlan, type RailQuoteRequest,
 } from '../types';
 import {
-  ANTHROPIC_UNSUPPORTED, APPLE_GIFTCARD_COUNTRIES, CARD_ISSUER_COVERAGE, OFAC_BLOCKED,
-  peerPlatformsFor,
+  ANTHROPIC_UNSUPPORTED, APPLE_GIFTCARD_COUNTRIES, OFAC_BLOCKED, peerPlatformsFor,
 } from './coverage';
 
 /** Tunable economics (docs/02-design.md D6). */
 const PEER_SPREAD_BPS = 100;      // ~1% maker spread, conservative
-const CARD_LEG_FEE_BPS = 100;     // JIT card issuer fee placeholder until Bridge pricing verified
+const GATEWAY_LEG_FEE_BPS = 100;  // bridge/swap (~10-50bps) + EUR/USD Visa spread (~20-40bps)
 const APPLE_LEG_FEE_BPS = 200;    // Bitrefill markup ceiling until verified
 const GIFT_LEG_FEE_BPS = 0;       // operator buys at face; costs covered by subrail fee
 const SUBRAIL_FEE_USD = 1.5;
 
-/** Primary first: USDC→Stripe direct via JIT card, then app-store, then gift code. */
+/** Primary first: the operator's Gnosis Pay gateway card, then app-store, then gift code. */
 const LEG_RANK: Record<LegKind, number> = {
-  virtual_card: 0,
+  gateway_card: 0,
   appstore_giftcard: 1,
   claude_gift_code: 2,
 };
@@ -31,9 +30,9 @@ const PLATFORM_DISCLOSURES: Partial<Record<PeerPlatform, DisclosureId>> = {
 function blockedPlan(req: RailQuoteRequest, reason: NonNullable<RailPlan['blocked']>['reason']): RailPlan {
   return {
     id: `blocked:${req.country}:${req.plan}`,
-    leg: 'appstore_giftcard',
+    leg: 'gateway_card',
     onramp: 'external_deposit',
-    cadence: { kind: 'apple_topup', period: 'monthly' },
+    cadence: { kind: 'card_recurring' },
     costs: { faceUsd: 0, onrampSpreadBps: 0, legFeeBps: 0, subrailFeeUsd: 0, estTotalMonthlyUsd: 0 },
     disclosures: [],
     blocked: { reason },
@@ -53,7 +52,7 @@ function costs(faceMonthlyUsd: number, onrampSpreadBps: number, legFeeBps: numbe
 
 /**
  * The rails router: country × plan × user's platforms × device → ranked viable RailPlans.
- * Pure and deterministic; liquidity-depth checks happen at quote-confirmation time, not here.
+ * Pure and deterministic; liquidity-depth checks happen at quote-confirmation time.
  */
 export function routeRails(req: RailQuoteRequest): RailPlan[] {
   if (OFAC_BLOCKED.has(req.country)) return [blockedPlan(req, 'sanctions')];
@@ -65,7 +64,7 @@ export function routeRails(req: RailQuoteRequest): RailPlan[] {
 
   const onramp: OnrampMode = preferred
     ? (req.device === 'desktop' ? 'peer_desktop_ext' : 'peer_app_handoff')
-    : 'external_deposit'; // no Peer rail → user deposits USDC from elsewhere
+    : 'external_deposit'; // no Peer rail → friend deposits USDC from elsewhere
 
   const baseDisclosures: DisclosureId[] = ['peer_no_recourse', 'circle_freeze', 'not_affiliated'];
   const platformDisclosure = preferred ? PLATFORM_DISCLOSURES[preferred] : undefined;
@@ -73,26 +72,19 @@ export function routeRails(req: RailQuoteRequest): RailPlan[] {
 
   const plans: RailPlan[] = [];
 
-  // PRIMARY — USDC→Stripe direct: user-named JIT card (Bridge via Stripe Issuing, or
-  // Kulipa) that pulls USDC from the user's wallet at authorization against an
-  // amount-bounded allowance. The merchant's recurring Stripe Billing sees an ordinary
-  // Visa debit card-on-file (docs/02-design.md D2).
-  const cardIssuer = CARD_ISSUER_COVERAGE.bridge.has(req.country)
-    ? 'bridge'
-    : CARD_ISSUER_COVERAGE.kulipa.has(req.country)
-      ? 'kulipa'
-      : null;
-  if (cardIssuer) {
-    plans.push({
-      id: `card:${cardIssuer}:${req.country}:${req.plan}`,
-      leg: 'virtual_card' satisfies LegKind,
-      onramp,
-      peerPlatform: preferred,
-      cadence: { kind: 'card_recurring' },
-      costs: costs(PLAN_FACE_USD[req.plan], preferred ? PEER_SPREAD_BPS : 0, CARD_LEG_FEE_BPS),
-      disclosures,
-    });
-  }
+  // PRIMARY — the gateway: the friend's USDC routes (Base USDC → Gnosis EURe via LI.FI)
+  // into the OPERATOR's Gnosis Pay Safe, and the operator's virtual card pays claude.ai
+  // directly (Stripe sees an ordinary Visa). Friend-country-independent: it's the
+  // operator's card that pays (docs/02-design.md §3).
+  plans.push({
+    id: `gateway:${req.country}:${req.plan}`,
+    leg: 'gateway_card' satisfies LegKind,
+    onramp,
+    peerPlatform: preferred,
+    cadence: { kind: 'card_recurring' },
+    costs: costs(PLAN_FACE_USD[req.plan], preferred ? PEER_SPREAD_BPS : 0, GATEWAY_LEG_FEE_BPS),
+    disclosures: [...disclosures, 'gateway_operator'],
+  });
 
   // Fallback 1 — app-store balance via crypto gift-card MoR, where Apple gift cards exist.
   if (APPLE_GIFTCARD_COUNTRIES.has(req.country)) {
@@ -124,9 +116,7 @@ export function routeRails(req: RailQuoteRequest): RailPlan[] {
     });
   }
 
-  if (plans.length === 0) return [blockedPlan(req, 'no_viable_leg')];
-
-  // Rank: USDC→Stripe card leg first (docs/02-design.md D2), then by all-in cost.
+  // Rank: gateway first (docs/02-design.md D2), then by all-in cost.
   return plans.sort((a, b) =>
     LEG_RANK[a.leg] !== LEG_RANK[b.leg]
       ? LEG_RANK[a.leg] - LEG_RANK[b.leg]

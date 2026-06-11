@@ -302,6 +302,41 @@ instant [H]. **No public data exists on MIT decline rates for JIT crypto-funded 
 the key evidence gap; generate it with a live pilot. Top risk of the Bridge primitive: the
 timing coupling between the allowance window and Stripe's Smart-Retries schedule.
 
+### 4.6 Gnosis Pay permissionless integration (follow-up research, 2026-06-11)
+
+Bridge's program is sales-gated with no self-serve signup, so the design pivoted to a
+**gateway model**: friends fund the operator's own Gnosis Pay account, whose card pays
+their subscriptions. Findings (docs read verbatim from the `github.com/gnosispay/docs`
+mirror of docs.gnosispay.com):
+
+- **Permissionless tier is real** [H]: *"no need to contact us or go through an approval
+  process… authenticate with our APIs using SIWE to receive a JWT."* No API key, contract,
+  or revenue share. Excluded from the tier: webhooks, PAN display (Partner Secure Element),
+  branded programs. SIWE domain: localhost auto-allowed; hosted domains self-register free
+  at partners.gnosispay.com.
+- **API surface (api.gnosispay.com, SIWE→JWT as the account owner)** [H]: nonce/challenge
+  auth; `GET /api/v1/cards`; **`POST /api/v1/cards/virtual` — free, instant**;
+  freeze/unfreeze; `GET /api/v1/cards/transactions` (merchant, billing amount/currency,
+  status, clearedAt — sufficient to reconcile Claude charges by polling); balances; Safe
+  config; gasless withdrawals + daily-limit updates via EIP-712 (3-minute Delay relay).
+- **Card cap: max 5 active cards per account** [H] (docs updated Nov 2025; older sources
+  say 10) → one virtual card per friend works for ≤4-5 friends, then shared cards with
+  merchant+amount attribution.
+- **Funding is permissionless** [H/M]: deposits are plain ERC-20 transfers to the Safe —
+  any address, instant, no Delay-module involvement (delay governs outgoing only). Gnosis
+  Pay docs themselves recommend LI.FI/Bungee/deBridge/CoW for cross-chain top-ups. **An
+  EEA/UK Safe spends EURe only** (UK: GBPe; USDC.e only in "select regions like Brazil")
+  — so the route is Base USDC → Gnosis Chain EURe in one aggregator transaction, recipient
+  = the Safe.
+- **FX**: 0% Gnosis Pay FX fee; EUR card → USD merchant at Visa wholesale (~0.2–0.4%
+  spread) [M]. Limits ~€8k/day, €5k/tx, ~€20k/mo [M].
+- **Risks** [H]: (1) personal-use-only ToS — "business or commercial usage is not
+  supported"; acceptable for a genuine friends circle, not a public product; (2) the
+  June 1, 2026 Delay-module exploit (~$265k, 100% reimbursed, Safes replaced by ~June 7;
+  the zodiac-core fix had sat unreleased since Feb) — platform risk is real; (3) cards
+  freeze ~3 minutes around withdrawals/limit changes — a charge landing in that window
+  declines.
+
 ## 5. Compliance: what shapes the architecture
 
 - **Money transmission [H]:** FinCEN FIN-2019-G001 + FIN-2014-R012 — accepting a user's CVC and

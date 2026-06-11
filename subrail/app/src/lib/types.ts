@@ -26,7 +26,7 @@ export const PeerPlatform = z.enum([
 ]);
 export type PeerPlatform = z.infer<typeof PeerPlatform>;
 
-export const LegKind = z.enum(['appstore_giftcard', 'claude_gift_code', 'virtual_card']);
+export const LegKind = z.enum(['appstore_giftcard', 'claude_gift_code', 'gateway_card']);
 export type LegKind = z.infer<typeof LegKind>;
 
 export const OnrampMode = z.enum(['peer_desktop_ext', 'peer_app_handoff', 'external_deposit']);
@@ -39,6 +39,7 @@ export const DisclosureId = z.enum([
   'peer_no_recourse',    // Peer cannot reverse/mediate fiat disputes
   'circle_freeze',       // USDC is freezable by the issuer
   'not_affiliated',      // Subrail is not affiliated with Anthropic
+  'gateway_operator',    // contributions fund the operator's personal Gnosis Pay Safe
 ]);
 export type DisclosureId = z.infer<typeof DisclosureId>;
 

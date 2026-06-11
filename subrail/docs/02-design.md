@@ -80,32 +80,35 @@ Key flow property: USDC sits in the user's wallet until the instant of value tra
 card authorization (primary) or merchant invoice payment (fallbacks). Subrail's service
 wallet receives only its own fee (an ordinary x402 `exact` payment).
 
-## 3. The primary leg: USDC → Stripe via JIT card
+## 3. The primary leg: the Gnosis Pay gateway (operator's card)
 
-This is the composability bet, confirmed by the mechanics research (01-research.md §4.5):
+Bridge's card program proved sales-gated with no self-serve signup, and the product
+narrowed to a **gateway for the operator's friends** (the operator already pays their
+subs manually). The leg is now built on **Gnosis Pay's permissionless integration model**
+(verbatim: "no need to contact us or go through an approval process… authenticate with
+our APIs using SIWE") — full findings in 01-research.md §4.6:
 
-- **Instrument:** Bridge (a Stripe company) stablecoin-backed virtual Visa via Stripe
-  Issuing, **non-custodial funding mode** — the card is issued in the user's name after
-  Bridge KYC, and is funded by an **amount-bounded ERC-20 approval** from the user's own
-  wallet to a developer-scoped Bridge delegate address. No prepaid float; Bridge pulls USDC
-  **at authorization**.
-- **Why it satisfies "interact with Stripe composably":** to claude.ai's Stripe Billing this
-  is an ordinary Visa debit card-on-file; merchant-initiated recurring charges are normally
-  SCA-exempt, so renewal succeeds iff allowance + balance cover the charge at the auth
-  instant — which is exactly the variable the agent controls.
-- **The renewal choreography (the agent's whole job):**
-  `T−24h` raise allowance to face × 1.03 → billing date: Anthropic charges, Bridge pulls
-  USDC → settle webhook confirms → after the Stripe Smart-Retries window, lower allowance
-  toward zero. Card and allowance ≈ $0 between cycles: minimal fraud/freeze surface.
-- **Failure handling:** declines inside the retry window are recoverable (hold the
-  allowance open, alert the user, top up balance); a terminal decline triggers fallback
-  selection. **No reimbursement is ever needed on this leg** — funds only move on success.
-- **Runner-up issuer:** Rain (Agent Control Layer: merchant allowlists, amount/frequency
-  caps, agent-issued cards) — better controls, enterprise-gated; adapter slot behind the
-  same `LastLeg` interface. Kulipa covers Nigeria.
-- **Known unknowns (M0 spikes):** Bridge program approval; explicit Base support for
-  Bridge's card contract (Solana confirmed; "EVM where deployed"); measured MIT decline
-  behavior on a live Claude subscription — no public data exists, so we generate it.
+- **Instrument:** the operator's own Gnosis Pay account — a self-custodial Gnosis Safe on
+  Gnosis Chain with Visa cards issued to the (KYC'd) operator. The app authenticates as
+  the operator (SIWE with an owner key → JWT) — no partnership, no API key.
+- **Funding (friend → gateway):** the friend's Base USDC routes in one aggregator
+  transaction (LI.FI — Gnosis Pay's own docs recommend it) to **EURe on Gnosis Chain,
+  delivered directly to the operator's Safe**. Deposits are plain ERC-20 transfers:
+  permissionless, instant, untouched by the Delay module. EEA Safes spend EURe only —
+  never deliver USDC.e.
+- **Spend:** the operator's **virtual cards** (`POST /api/v1/cards/virtual`, free,
+  instant, max 5 active per account → one per friend up to ~4) sit on the friends'
+  claude.ai accounts as ordinary Visa card-on-file. EUR card pays the USD charge at Visa
+  wholesale FX, 0% Gnosis Pay fee. Total drag ≈ bridge/swap + FX spread, well under 1%.
+- **Reconciliation:** no webhooks on the permissionless tier → poll
+  `GET /api/v1/cards/transactions` (merchant + billing amount + clearedAt identifies
+  Anthropic charges; cardToken maps charges to friends). Friend standings = contributions
+  − attributed charges (`lib/gateway/ledger.ts`, pure + tested).
+- **Honest constraints:** Gnosis Pay's ToS is personal-use-only — this design is for a
+  genuine friends circle, not a public product; the 5-card cap bounds per-friend
+  attribution; cards freeze ~3 minutes around withdrawals (don't withdraw near billing
+  dates); platform risk is live (June 1, 2026 Delay-module exploit — fully reimbursed,
+  but real).
 
 ## 4. Rails router
 
