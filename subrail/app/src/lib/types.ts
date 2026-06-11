@@ -105,6 +105,10 @@ export interface RenewalJob {
   state: RenewalState;
   attempts: number;
   lastError?: string;
+  /** USDC pulled from the user's wallet for this cycle but not yet delivered as value.
+   *  On failure this amount is reimbursed to the same wallet the user onramped into. */
+  pulledUsd?: number;
+  reimbursedTx?: `0x${string}`;
   artifact?: { kind: 'gift_code' | 'apple_code'; deliveredTo: string };
 }
 

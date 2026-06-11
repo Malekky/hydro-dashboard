@@ -46,7 +46,28 @@ describe('renewal scheduler', () => {
   it('fails after max attempts', () => {
     const { next, effect } = decide({ ...base, state: 'executing', attempts: 3, lastError: 'boom' }, ctx());
     expect(next.state).toBe('failed');
-    expect(effect).toEqual({ kind: 'mark_failed', reason: 'boom' });
+    expect(effect).toEqual({ kind: 'mark_failed', reason: 'boom', reimburseUsd: undefined });
+  });
+
+  it('reimburses pulled-but-undelivered USDC to the user wallet on failure', () => {
+    const { effect } = decide(
+      { ...base, state: 'executing', attempts: 3, lastError: 'leg failed', pulledUsd: 22 },
+      ctx(),
+    );
+    expect(effect).toEqual({ kind: 'mark_failed', reason: 'leg failed', reimburseUsd: 22 });
+  });
+
+  it('does not reimburse when the artifact was already delivered', () => {
+    const { effect } = decide(
+      {
+        ...base,
+        state: 'awaiting_user_action',
+        pulledUsd: 22,
+        artifact: { kind: 'gift_code', deliveredTo: 'user@example.com' },
+      },
+      ctx({ awaitingSince: new Date('2026-06-20T00:00:00Z') }),
+    );
+    expect(effect).toEqual({ kind: 'mark_failed', reason: 'user action timeout', reimburseUsd: undefined });
   });
 
   it('reminds, then times out, awaiting user action', () => {

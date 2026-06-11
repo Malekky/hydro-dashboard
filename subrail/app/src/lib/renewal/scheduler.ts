@@ -12,7 +12,9 @@ export type RenewalEffect =
   | { kind: 'execute_leg' }
   | { kind: 'nudge_topup' }
   | { kind: 'remind_user_action' }
-  | { kind: 'mark_failed'; reason: string };
+  /** Failure with funds in flight: return `reimburseUsd` USDC to the user's wallet
+   *  (the same wallet the Peer onramp settled into) before marking failed. */
+  | { kind: 'mark_failed'; reason: string; reimburseUsd?: number };
 
 export interface TickContext {
   now: Date;
@@ -46,9 +48,10 @@ export function decide(job: RenewalJob, ctx: TickContext): { next: RenewalJob; e
     case 'executing': {
       // Re-entered by the tick only if the previous execution attempt errored out.
       if (job.attempts >= MAX_RENEWAL_ATTEMPTS) {
+        const reason = job.lastError ?? 'max attempts exceeded';
         return {
-          next: { ...job, state: 'failed', lastError: job.lastError ?? 'max attempts exceeded' },
-          effect: { kind: 'mark_failed', reason: job.lastError ?? 'max attempts exceeded' },
+          next: { ...job, state: 'failed', lastError: reason },
+          effect: { kind: 'mark_failed', reason, reimburseUsd: job.pulledUsd },
         };
       }
       return { next: { ...job, attempts: job.attempts + 1 }, effect: { kind: 'execute_leg' } };
@@ -57,9 +60,13 @@ export function decide(job: RenewalJob, ctx: TickContext): { next: RenewalJob; e
       const since = ctx.awaitingSince ?? job.dueAt;
       const elapsedDays = (ctx.now.getTime() - since.getTime()) / DAY_MS;
       if (elapsedDays >= USER_ACTION_TIMEOUT_DAYS) {
+        // Artifact was delivered but never used; reimbursement here is policy-dependent
+        // (a delivered gift code has consumed funds at the MoR). Reimburse only what is
+        // still recoverable, i.e. pulled-but-undelivered funds.
+        const recoverable = job.artifact ? undefined : job.pulledUsd;
         return {
           next: { ...job, state: 'failed', lastError: 'user action timeout' },
-          effect: { kind: 'mark_failed', reason: 'user action timeout' },
+          effect: { kind: 'mark_failed', reason: 'user action timeout', reimburseUsd: recoverable },
         };
       }
       return { next: job, effect: { kind: 'remind_user_action' } };
