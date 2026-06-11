@@ -13,15 +13,16 @@ Implements `02-design.md`. Scope: M1 (v1 PWA) with M2 interfaces stubbed. The sc
 | Chain | Base mainnet (8453); Base Sepolia for dev | Peer settlement chain; native USDC |
 | Wallet | Coinbase Smart Wallet SDK (passkey ERC-4337) via wagmi/viem | Passkey UX, paymaster gas sponsorship, native Spend Permissions |
 | Onramp | `@zkp2p/sdk` ≥0.5.0 (+ `/react`), `@zkp2p/contracts-v2` | Headless desktop flow; mobile handoff v1; RN SDK in v1.5 |
-| Payments | x402 (`exact` scheme, Base USDC) for Subrail's service fee; Coinbase Spend Permissions for renewal pulls | See D1 |
-| Last legs | Bitrefill Business API (Leg A); operator gift-code service (Leg B, feature-flagged off until legal gate clears) | See D2 |
+| Payments | x402 (`exact` scheme, Base USDC) for Subrail's service fee; amount-bounded USDC allowance management for the card leg; Coinbase Spend Permissions for fallback-leg pulls | See D1 |
+| Payment legs | **Primary: Bridge (Stripe Issuing) JIT card** (`legs/bridgeCard.ts`); fallbacks: Bitrefill Business API (app-store), operator gift-code service (`FEATURE_LEG_B`) | See D2/§3 of design |
 | Persistence | Postgres (Neon/Supabase) + Drizzle ORM | Renewal jobs need durable state + locks |
 | Jobs | Vercel Cron → `/api/renewals/tick` (idempotent); upgradeable to Temporal in M2 | Renewals are minute-granular, not ms |
 | Telemetry | OpenTelemetry + PostHog (no PII beyond country) | |
 
 Env (`.env.example`): `DATABASE_URL`, `BASE_RPC_URL`, `PAYMASTER_URL`, `SPENDER_PRIVATE_KEY`
-(renewal service signer — KMS in prod), `BITREFILL_API_KEY`, `X402_FACILITATOR_URL`,
-`GEOIP_DB_PATH`, `FEATURE_LEG_B=false`, `FEATURE_AUTONOMOUS_RENEWALS=false`.
+(renewal service signer — KMS in prod), `BRIDGE_API_KEY`, `BITREFILL_API_KEY`,
+`X402_FACILITATOR_URL`, `GEOIP_DB_PATH`, `FEATURE_LEG_B=false`,
+`FEATURE_AUTONOMOUS_RENEWALS=false`.
 
 ## 2. Repo layout (== scaffold)
 
@@ -45,8 +46,9 @@ subrail/app/
       pay/x402.ts             # minimal exact-scheme client+server helpers
       pay/mpp.ts              # PaymentRail adapter stub (phase 2)
       legs/types.ts           # LastLeg interface
-      legs/bitrefill.ts       # Leg A executor (Bitrefill Business API client)
-      legs/claudeGift.ts      # Leg B executor (feature-flagged)
+      legs/bridgeCard.ts      # PRIMARY: Bridge JIT card (allowance choreography)
+      legs/bitrefill.ts       # fallback 1: app-store gift cards (Bitrefill API)
+      legs/claudeGift.ts      # fallback 2: official Claude gift codes (feature-flagged)
       renewal/scheduler.ts    # pure state machine: RenewalJob transitions
       compliance/geo.ts       # continuous geo-gate (OFAC + Anthropic lists)
     tests/                    # vitest: router, scheduler, geo
@@ -90,17 +92,21 @@ interface RenewalJob { id: string; subscriptionId: string; leg: LegKind;
   state: 'scheduled' | 'awaiting_funds' | 'executing' | 'awaiting_user_action'
        | 'confirmed' | 'failed' | 'cancelled';
   attempts: number; lastError?: string;
+  pulledUsd?: number;          // pulled-but-undelivered → reimbursed on failure (D6)
+  reimbursedTx?: Hex;
   artifact?: { kind: 'gift_code' | 'apple_code'; deliveredTo: string }; }
 ```
 
 State machines (pure functions in `renewal/scheduler.ts`, unit-tested):
 - **FundingIntent:** `created → awaiting_fiat → attested → settled`; timeouts → `expired`;
   attestation mismatch → `failed` (user-facing remediation copy per Peer's no-recourse model).
-- **RenewalJob:** `scheduled → (balance check) → executing → awaiting_user_action →
-  confirmed`. `awaiting_funds` emits a top-up nudge with a prefilled FundingIntent.
-  `awaiting_user_action` = the user's one tap (redeem code / confirm Apple top-up); reminders at
-  T+1d/3d; job fails (and pull is refunded where possible) at T+7d. Max 3 execution attempts,
-  exponential backoff, idempotency key = `jobId:attempt`.
+- **RenewalJob:** `scheduled → (balance check) → executing → [awaiting_user_action] →
+  confirmed`. Card leg: `executing` = allowance raised, `confirmed` on settled-auth webhook
+  (no user action). Fallback legs: `awaiting_user_action` = the user's one tap (redeem code /
+  confirm Apple top-up); reminders at T+1d/3d; fails at T+7d. On any failure, the scheduler
+  emits `mark_failed` with `reimburseUsd` = pulled-but-undelivered funds, returned to the
+  user's onramp wallet (design D6). Max 3 execution attempts, exponential backoff,
+  idempotency key = `jobId:attempt`.
 
 ## 4. Core flows (integration detail)
 
@@ -122,7 +128,26 @@ source + Subrail fee address. UI shows the grant in plain language + a working r
 (on-chain revocation, verified in e2e tests). The renewal signer is a dedicated key (KMS) that
 can do nothing but execute permitted pulls.
 
-### 4.3 Leg A — `legs/bitrefill.ts`
+### 4.3 Primary leg — `legs/bridgeCard.ts` (USDC → Stripe via Bridge JIT card)
+
+Setup (once per user): Bridge customer + KYC → virtual Visa in the user's name → user grants
+an amount-bounded USDC approval to the developer-scoped Bridge delegate → user enters the
+card at claude.ai checkout (guided in-app; we never touch Anthropic credentials).
+
+Renewal choreography per cycle (design §3): at `T−24h` before the estimated billing date,
+raise the allowance to `face × (1 + bufferBps)`; Anthropic's MIT charge triggers Bridge's
+JIT pull from the user's wallet at authorization; on the settled-auth webhook the job goes
+`confirmed`; after the Stripe Smart-Retries window, lower the allowance toward zero. Billing
+date estimate is user-entered at setup and tightened from auth webhooks each cycle.
+
+Failure handling: declines inside the retry window → keep window open, top-up nudge;
+terminal decline → fallback-leg selection surfaced to the user. No reimbursement applies on
+this leg (funds move only at successful authorization).
+
+M0 spikes gate production: Bridge program approval (KYB), explicit Base chain confirmation,
+and a 3-cycle live pilot measuring MIT auth behavior incl. one deliberate allowance miss.
+
+### 4.4 Fallback 1 — `legs/bitrefill.ts`
 Bitrefill Business API: maintain a small operator balance OR pay per-invoice; **preferred:
 invoice flow where the user's wallet pays the invoice's USDC deposit address directly via the
 spend-permission pull** (user → Bitrefill, no transit through Subrail). Product selection:
@@ -132,7 +157,7 @@ until user confirms redemption; Apple balance then auto-renews the IAP subscript
 Open item from research (§8.3): confirm Apple SKUs on our key tier with api@bitrefill.com;
 Reloadly client behind the same `LastLeg` interface as fallback.
 
-### 4.4 Leg B — `legs/claudeGift.ts` (`FEATURE_LEG_B`, default off)
+### 4.5 Fallback 2 — `legs/claudeGift.ts` (`FEATURE_LEG_B`, default off)
 Operator entity purchases an official Claude gift (≥3 months) at claude.ai/gift for the user's
 email, after collecting the equivalent USDC from the user's wallet (pull → operator's segregated
 merchant account — this is the one leg where the operator is the MoR; launch-gated on the legal
@@ -140,17 +165,18 @@ memo). Scheduling rule enforced in the router AND the scheduler: next purchase d
 current period expiry − 24h; never auto-redeem; user redeems at claude.ai/gift/redeem.
 Runbook for redemption failures (#41499 class): pause corridor, manual support, refund path.
 
-### 4.5 Fee — `pay/x402.ts`
+### 4.6 Fee — `pay/x402.ts`
 `/api/fee` returns 402 with `exact`-scheme requirements (USDC Base, Subrail fee address); the
 client wallet signs EIP-3009; facilitator settles. Doubles as our dogfooded x402 surface and
 keeps fee collection auditable and separate from principal flows.
 
-### 4.6 Compliance — `compliance/geo.ts`
+### 4.7 Compliance — `compliance/geo.ts`
+Scope per design D5: geo-blocking + disclosures; everything else is carried by the regulated
+stack (RTPNs on the fiat side, Bridge/Kulipa KYC on the card side, Bitrefill as MoR).
 Every session AND every state-mutating API call: GeoIP country →
-`blockedCountries = OFAC_COMPREHENSIVE ∪ ANTHROPIC_UNSUPPORTED` → hard block + logged event
-(Exodus-standard continuous enforcement). VPN/proxy heuristic score → step-up friction.
-Disclosure acceptance (per `DisclosureId`) recorded with timestamp pre-onramp. No PII storage
-beyond email + country; card legs (M3) delegate KYC entirely to the issuer.
+`blockedCountries = OFAC_COMPREHENSIVE ∪ ANTHROPIC_UNSUPPORTED` → hard block + logged event.
+VPN/proxy heuristic score → step-up friction. Disclosure acceptance (per `DisclosureId`)
+recorded with timestamp pre-onramp. No PII beyond email + country lives in Subrail.
 
 ## 5. API surface (v1)
 
@@ -179,22 +205,26 @@ beyond email + country; card legs (M3) delegate KYC entirely to the issuer.
 
 ## 7. Testing & acceptance
 
-- **Unit (vitest):** router (coverage matrix × blocked × cadence rules — incl. "never 1-month
-  gift codes", "Apple country mismatch → no Leg A"); scheduler transitions (idempotent tick,
-  backoff, expiry-boundary rule); geo gate.
-- **Integration:** Base Sepolia: spend-permission grant → pull → revoke; x402 402→settle
-  against CDP facilitator sandbox; Bitrefill sandbox/test products.
-- **E2E pilots (M0, manual — these gate the build):** AR/BR/IN/US Apple-balance auto-renew of
-  Claude iOS sub; 3-month gift code redeem + expiry-boundary renewal on a real account; Peer
-  desktop + app-handoff onramps at $25 and $120 tickets.
-- **Acceptance for M1 launch:** a new user in BR completes picker → wallet → Peer funding →
-  Leg A purchase → active Claude Pro in <30 min with ≤2 support touches; renewal succeeds on
-  manual trigger; revocation works; blocked-country access is impossible by IP and by declared
-  country; all four disclosures shown and recorded.
+- **Unit (vitest):** router (card-leg-first ranking, coverage matrix × blocked × cadence
+  rules — incl. "never 1-month gift codes", "no card issuer → fallback"); scheduler
+  transitions (idempotent tick, backoff, expiry-boundary rule, reimbursement emission); geo
+  gate.
+- **Integration:** Base Sepolia: allowance raise/lower + spend-permission grant → pull →
+  revoke; x402 402→settle against CDP facilitator sandbox; Bridge sandbox card issuance;
+  Bitrefill sandbox/test products.
+- **E2E pilots (M0, manual — these gate the build):** Bridge card on a live Claude Pro
+  subscription for 3 cycles incl. one deliberate allowance-miss + recovery; Peer desktop +
+  app-handoff onramps at $25 and $120 tickets; AR/BR/IN/US Apple-balance auto-renew
+  (fallback 1); 3-month gift code redeem + expiry-boundary renewal (fallback 2).
+- **Acceptance for M1 launch:** a new user in a Bridge-covered corridor (US/AR) completes
+  picker → wallet → Peer funding → card setup → active Claude Pro in <30 min with ≤2
+  support touches; a renewal cycle completes via the allowance choreography; a forced
+  failure reimburses USDC to the user's wallet in <1h; allowance revocation works;
+  blocked-country access is impossible by IP and by declared country; disclosures recorded.
 
 ## 8. Deferred (M2/M3 hooks present in code)
 
-MPP adapter (`pay/mpp.ts` implements `PaymentRail`); Leg C issuer clients behind `LastLeg`;
+MPP adapter (`pay/mpp.ts` implements `PaymentRail`); Rain/Kulipa issuer adapters behind `LastLeg`;
 RN/Expo shell with `@zkp2p/zkp2p-react-native-sdk`; autonomous renewals flag; corridor
 liquidity telemetry; x402 Bazaar listing; Anthropic partnership track (the Leg-B legal memo and
 outreach are M0 tasks, not code).

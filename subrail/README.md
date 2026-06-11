@@ -6,18 +6,22 @@ People in much of the world have local money (Mercado Pago, Wise, Cash App, mobi
 no card that clears claude.ai's Stripe checkout. Subrail bundles two pieces of programmable
 payments infrastructure into one app:
 
-1. **Peer (zkp2p)** — a trustless P2P onramp: the user pays a maker on a payment network they
-   already use and receives USDC in **their own** passkey smart wallet on Base.
-2. **An agentic payment protocol** (x402 + spend permissions on Base; Tempo MPP as a phase-2
-   adapter) — a capped, revocable authorization that lets Subrail's renewal agent keep the
-   subscription paid through the most reliable **last leg** for the user's country:
-   - **Leg A:** USDC → Bitrefill (merchant of record) → Apple/Google gift card → app-store
-     balance → Claude in-app subscription auto-renews.
-   - **Leg B:** USDC → official Claude gift-subscription code (claude.ai/gift) → user redeems.
-   - **Leg C (phase 2):** user-named virtual card via Bridge/Rain/Kulipa → Stripe checkout.
+1. **Peer (zkp2p)** — the way to acquire stables: the user pays a maker on a payment network
+   they already use and receives USDC in **their own** passkey smart wallet on Base. (Any
+   other USDC deposit works too — USDC is simply the instrument their local currency can't be.)
+2. **An agentic renewal service** that interacts with Stripe composably:
+   - **Primary — USDC → Stripe directly:** a JIT-funded virtual Visa in the user's name
+     (Bridge via Stripe Issuing): the wallet grants an amount-bounded USDC allowance, the
+     card pulls funds **at authorization**, and claude.ai's recurring Stripe charge just
+     works against an ordinary card-on-file. Allowance ≈ $0 between cycles.
+   - **Fallback 1:** USDC → Bitrefill (merchant of record) → Apple/Google gift card →
+     app-store balance → Claude in-app subscription auto-renews.
+   - **Fallback 2:** USDC → official Claude gift-subscription code (claude.ai/gift).
 
 Non-custodial by construction: user principal moves wallet → merchant directly and never
-transits Subrail. Sanctioned and Claude-unsupported regions are geo-blocked continuously.
+transits Subrail; failed cycles reimburse USDC back to the user's onramp wallet. Compliance
+is carried by the regulated stack (RTPNs, issuers, MoRs); Subrail enforces geo-blocking for
+sanctioned and Claude-unsupported regions.
 
 ## This directory
 
@@ -46,8 +50,8 @@ curl -s localhost:3000/api/quote -X POST -H 'content-type: application/json' \
 
 ## Status
 
-Prototype/spec stage. The four M0 validation spikes in `docs/02-design.md §6` gate any real
-build: Apple-balance auto-renew pilots, gift-code expiry-boundary renewal test, Peer onramp
-e2e, and the money-transmission legal memo.
+Prototype/spec stage. The M0 validation spikes in `docs/02-design.md §8` gate any real
+build — first among them the Bridge card pilot: a live Claude Pro subscription paid through
+the JIT allowance choreography for 3 cycles, plus Base-support confirmation from Bridge.
 
 Subrail is not affiliated with Anthropic.

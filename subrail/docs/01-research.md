@@ -262,6 +262,46 @@ subscription substrate and the likeliest rail if Stripe ever fronts Anthropic st
   all come from card vendors; recurring (MIT) clearance on stablecoin cards is undocumented by
   every provider — pilot-test, never assume [M].
 
+### 4.5 USDC → Stripe directly: JIT-funded card mechanics (follow-up research, 2026-06-11)
+
+Focused question: how can self-custodied USDC on Base pay a Stripe **card** checkout at a
+merchant that has NOT opted into Stripe's stablecoin products? Findings, ranked by
+composability:
+
+1. **Bridge (Stripe-owned) stablecoin-backed cards via Stripe Issuing — the verdict** [H]:
+   non-custodial funding mode pulls USDC from the user's own wallet **at card authorization**
+   ("just-in-time"), against a prior **amount-bounded ERC-20 approval** to a developer-scoped
+   Bridge delegate address. No prepaid float; the allowance can sit ≈$0 between cycles and be
+   raised to exactly one cycle before the merchant's billing date. Public self-serve docs
+   (standard Stripe Issuing objects + Bridge endpoints); Privy/third-party wallets supported;
+   the card is a real Visa debit that Stripe Billing treats as ordinary card-on-file.
+   Solana program confirmed; EVM "where the Bridge contract is deployed" — **Base not
+   explicitly enumerated** [M], verify with Bridge.
+2. **Rain** [M-H]: hold-at-auth against on-chain balances, USDC settlement with Visa, and an
+   **Agent Control Layer** (MCC/merchant allowlists, amount/frequency caps, agent-issued
+   cards, expiry) — the richest spending-control API found, but enterprise-gated (MSA).
+3. **Kulipa** [M]: true JIT — moves funds to escrow *inside* the auth window, session-key
+   clearing (Argent cosigner model); B2B for wallet companies, not self-serve.
+4. **Immersve** [H mechanics]: deposit/escrow model (not wallet-pull at auth); open docs and
+   contracts; live on Polygon/Algorand, Base unconfirmed.
+5. **MetaMask Card (Baanx)** [H]: self-custodial JIT with on-chain spending-cap allowance,
+   **Base supported**, auth verified <5s, explicitly marketed for subscriptions — proof the
+   model handles recurring charges, but consumer-only (no third-party API).
+6. **Holyheld BRRR API** [M]: agent-driven exact-amount top-up via bearer-token API —
+   fastest hack, but prepaid and EUR-denominated.
+7. **Agentic card credentials (Visa Intelligent Commerce / Mastercard Agent Pay)** [H
+   existence / L access]: tokenize an *existing* card for an agent with spend controls;
+   restricted pilot access; they delegate credentials, they don't create a stablecoin
+   funding instrument — a crypto-funded card still sits underneath.
+8. **Stripe payer-side (Link / Onramp / Pay-with-Crypto)** [H]: no path without merchant
+   opt-in — confirmed dead end.
+
+Recurring-charge reality: MIT/off-session charges are normally SCA/3DS-exempt; success is
+purely a function of the issuer approving the auth with allowance+balance in place at that
+instant [H]. **No public data exists on MIT decline rates for JIT crypto-funded cards** —
+the key evidence gap; generate it with a live pilot. Top risk of the Bridge primitive: the
+timing coupling between the allowance window and Stripe's Smart-Retries schedule.
+
 ## 5. Compliance: what shapes the architecture
 
 - **Money transmission [H]:** FinCEN FIN-2019-G001 + FIN-2014-R012 — accepting a user's CVC and

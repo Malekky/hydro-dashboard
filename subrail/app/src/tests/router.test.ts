@@ -13,24 +13,32 @@ describe('rails router', () => {
     expect(plans[0].blocked?.reason).toBe('anthropic_unsupported');
   });
 
-  it('ranks Leg A first where Apple gift cards exist (Brazil + Mercado Pago)', () => {
-    const plans = routeRails({ country: 'BR', plan: 'pro', platforms: ['mercado_pago'], device: 'mobile' });
-    expect(plans[0].leg).toBe('appstore_giftcard');
+  it('ranks the USDC→Stripe card leg first where an issuer covers the country (US)', () => {
+    const plans = routeRails({ country: 'US', plan: 'pro', platforms: ['cashapp'], device: 'mobile' });
+    expect(plans[0].leg).toBe('virtual_card');
+    expect(plans[0].cadence).toEqual({ kind: 'card_recurring' });
+  });
+
+  it('serves Nigeria via the card leg (Kulipa) with gift code as fallback', () => {
+    const plans = routeRails({ country: 'NG', plan: 'pro', platforms: [], device: 'mobile' });
+    expect(plans.map((p) => p.leg)).toEqual(['virtual_card', 'claude_gift_code']);
+  });
+
+  it('serves Argentina via the card leg (Bridge) over Peer/Mercado Pago', () => {
+    const plans = routeRails({ country: 'AR', plan: 'pro', platforms: ['mercado_pago'], device: 'mobile' });
+    expect(plans[0].leg).toBe('virtual_card');
     expect(plans[0].peerPlatform).toBe('mercado_pago');
     expect(plans[0].onramp).toBe('peer_app_handoff');
   });
 
-  it('offers only Leg B where Apple coverage is unverified (Argentina)', () => {
-    // AR Apple gift-card availability is unconfirmed (docs/01-research.md §8); the matrix
-    // omits it until verified, so the router must not promise Leg A there.
-    const plans = routeRails({ country: 'AR', plan: 'pro', platforms: ['mercado_pago'], device: 'mobile' });
-    expect(plans[0].leg).toBe('claude_gift_code');
+  it('falls back to the app-store leg where no card issuer covers the country (Brazil)', () => {
+    const plans = routeRails({ country: 'BR', plan: 'pro', platforms: ['mercado_pago'], device: 'mobile' });
+    expect(plans[0].leg).toBe('appstore_giftcard');
   });
 
-  it('falls back to Leg B where Apple gift cards are unavailable (Nigeria)', () => {
+  it('uses external deposit when the user has no reachable Peer platform (Nigeria)', () => {
     const plans = routeRails({ country: 'NG', plan: 'pro', platforms: [], device: 'mobile' });
-    expect(plans[0].leg).toBe('claude_gift_code');
-    expect(plans[0].onramp).toBe('external_deposit'); // no Peer rail declared/reachable
+    expect(plans[0].onramp).toBe('external_deposit'); // onramp leg = how stables are acquired
   });
 
   it('never quotes 1-month gift codes (stacking hazard)', () => {

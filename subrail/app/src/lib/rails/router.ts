@@ -4,14 +4,23 @@ import {
   type PeerPlatform, type RailPlan, type RailQuoteRequest,
 } from '../types';
 import {
-  ANTHROPIC_UNSUPPORTED, APPLE_GIFTCARD_COUNTRIES, OFAC_BLOCKED, peerPlatformsFor,
+  ANTHROPIC_UNSUPPORTED, APPLE_GIFTCARD_COUNTRIES, CARD_ISSUER_COVERAGE, OFAC_BLOCKED,
+  peerPlatformsFor,
 } from './coverage';
 
 /** Tunable economics (docs/02-design.md D6). */
 const PEER_SPREAD_BPS = 100;      // ~1% maker spread, conservative
+const CARD_LEG_FEE_BPS = 100;     // JIT card issuer fee placeholder until Bridge pricing verified
 const APPLE_LEG_FEE_BPS = 200;    // Bitrefill markup ceiling until verified
 const GIFT_LEG_FEE_BPS = 0;       // operator buys at face; costs covered by subrail fee
 const SUBRAIL_FEE_USD = 1.5;
+
+/** Primary first: USDC→Stripe direct via JIT card, then app-store, then gift code. */
+const LEG_RANK: Record<LegKind, number> = {
+  virtual_card: 0,
+  appstore_giftcard: 1,
+  claude_gift_code: 2,
+};
 
 const PLATFORM_DISCLOSURES: Partial<Record<PeerPlatform, DisclosureId>> = {
   wise: 'wise_p2p_tos',
@@ -64,11 +73,32 @@ export function routeRails(req: RailQuoteRequest): RailPlan[] {
 
   const plans: RailPlan[] = [];
 
-  // Leg A — app-store balance via crypto gift-card MoR. Primary where Apple gift cards exist.
+  // PRIMARY — USDC→Stripe direct: user-named JIT card (Bridge via Stripe Issuing, or
+  // Kulipa) that pulls USDC from the user's wallet at authorization against an
+  // amount-bounded allowance. The merchant's recurring Stripe Billing sees an ordinary
+  // Visa debit card-on-file (docs/02-design.md D2).
+  const cardIssuer = CARD_ISSUER_COVERAGE.bridge.has(req.country)
+    ? 'bridge'
+    : CARD_ISSUER_COVERAGE.kulipa.has(req.country)
+      ? 'kulipa'
+      : null;
+  if (cardIssuer) {
+    plans.push({
+      id: `card:${cardIssuer}:${req.country}:${req.plan}`,
+      leg: 'virtual_card' satisfies LegKind,
+      onramp,
+      peerPlatform: preferred,
+      cadence: { kind: 'card_recurring' },
+      costs: costs(PLAN_FACE_USD[req.plan], preferred ? PEER_SPREAD_BPS : 0, CARD_LEG_FEE_BPS),
+      disclosures,
+    });
+  }
+
+  // Fallback 1 — app-store balance via crypto gift-card MoR, where Apple gift cards exist.
   if (APPLE_GIFTCARD_COUNTRIES.has(req.country)) {
     const cadence: Cadence = { kind: 'apple_topup', period: 'monthly' };
     plans.push({
-      id: `A:${req.country}:${req.plan}`,
+      id: `appstore:${req.country}:${req.plan}`,
       leg: 'appstore_giftcard' satisfies LegKind,
       onramp,
       peerPlatform: preferred,
@@ -78,13 +108,13 @@ export function routeRails(req: RailQuoteRequest): RailPlan[] {
     });
   }
 
-  // Leg B — official Claude gift codes. 3-month minimum (stacking hazard); feature-flagged
-  // in execution, but always quotable so coverage gaps are visible in the UI.
+  // Fallback 2 — official Claude gift codes. 3-month minimum (stacking hazard);
+  // feature-flagged in execution, but always quotable so coverage gaps are visible.
   {
     const months = 3 as const;
     const faceMonthly = GIFT_FACE_USD[req.plan][months] / months;
     plans.push({
-      id: `B:${req.country}:${req.plan}`,
+      id: `gift:${req.country}:${req.plan}`,
       leg: 'claude_gift_code',
       onramp,
       peerPlatform: preferred,
@@ -94,14 +124,12 @@ export function routeRails(req: RailQuoteRequest): RailPlan[] {
     });
   }
 
-  // Leg C (virtual_card) is phase 2 — intentionally not quoted yet (docs/03-spec.md §8).
-
   if (plans.length === 0) return [blockedPlan(req, 'no_viable_leg')];
 
-  // Rank: Leg A first when available (docs/02-design.md D2), then by all-in cost.
+  // Rank: USDC→Stripe card leg first (docs/02-design.md D2), then by all-in cost.
   return plans.sort((a, b) =>
-    a.leg === b.leg
-      ? a.costs.estTotalMonthlyUsd - b.costs.estTotalMonthlyUsd
-      : a.leg === 'appstore_giftcard' ? -1 : 1,
+    LEG_RANK[a.leg] !== LEG_RANK[b.leg]
+      ? LEG_RANK[a.leg] - LEG_RANK[b.leg]
+      : a.costs.estTotalMonthlyUsd - b.costs.estTotalMonthlyUsd,
   );
 }

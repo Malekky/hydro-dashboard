@@ -2,17 +2,26 @@
 
 **Working name:** Subrail — "subscribe to Claude from anywhere."
 **One-liner:** A non-custodial app that turns local money into a running claude.ai subscription:
-Peer (zkp2p) onramps fiat to USDC in the user's own wallet, and an x402/spend-permission renewal
-agent keeps the subscription paid through the most reliable last leg for the user's country.
+Peer (zkp2p) onramps fiat to USDC in the user's own wallet — USDC being the spendable
+instrument their local currency can't be — and an agentic renewal service keeps the
+subscription paid, primarily by interacting with Stripe directly through a just-in-time
+USDC-funded card, with composable fallbacks.
 
-This design follows directly from the research verdicts in `01-research.md`. Every structural
-choice below exists to satisfy one of three hard constraints:
+Framing decisions (product owner direction, 2026-06):
 
-- **C1 — Anthropic accepts only cards/app-store billing**; every crypto path is an indirection.
-- **C2 — The app must never become the money transmitter**: no pooled custody, no "we take your
-  USDC and pay your bill"; licensed merchants of record (MoR) sit on every regulated leg.
-- **C3 — Purchases must be user-initiated, in the user's own name, for the user's own account**
-  (the pattern Anthropic's ToS and 2026 enforcement leave alone).
+- **The onramp leg is simply how the user acquires stables.** Local currency can't pay
+  Anthropic; USDC can be made to. Peer is the preferred acquisition method (P2P, ~2 min,
+  builder fees), but any USDC arriving in the user's wallet works (`external_deposit`).
+  Everything after the wallet is rail-agnostic.
+- **Compliance is carried by the regulated stack, not the app.** Every fiat touchpoint runs
+  through a compliant RTPN (Venmo/Wise/Mercado Pago… on the Peer side) and every card/KYC
+  touchpoint through a regulated issuer (Bridge/Kulipa). Subrail's own obligations reduce to
+  **geo-blocking** (OFAC-comprehensive + Anthropic-unsupported countries, enforced
+  continuously by IP) and honest disclosures. Residual risk analysis is preserved in
+  `01-research.md §5` for reference, not as a product gate.
+- **If a cycle fails, the user is made whole in USDC**: any funds pulled for a cycle that
+  didn't deliver value are reimbursed to the same wallet the Peer onramp settled into
+  (the primary leg never needs this — funds move only at successful card authorization).
 
 ---
 
@@ -20,25 +29,16 @@ choice below exists to satisfy one of three hard constraints:
 
 ### What the user experiences
 
-1. **Onboard** (~2 min): pick country + Claude plan → Subrail shows the *rail plan* (which
-   onramp platform, which last leg, total monthly cost incl. all spreads/fees) → create a
-   passkey smart wallet (no seed phrase).
-2. **Fund** (~3 min): Peer onramp — user pays a maker on a platform they already use (Mercado
-   Pago, Wise, Cash App, …); USDC lands in *their* wallet on Base.
-3. **Authorize once**: grant the renewal agent a scoped spend permission — e.g. "≤ $25/month,
-   only to these merchant addresses, revocable anytime."
-4. **Stay subscribed**: the agent executes the last leg on schedule (gift-code delivery or
-   app-store top-up), nudges the user for the one-tap redemption step when a leg requires it,
-   and warns when the wallet needs topping up (deep-link back into the Peer flow).
-
-### What Subrail actually is (and is not)
-
-| Is | Is not |
-|---|---|
-| A **rails router**: country × plan → ranked viable paths with true cost | An exchange, wallet custodian, or money transmitter |
-| A **non-custodial smart-wallet** front end (passkey, ERC-4337 on Base) | A reseller of Claude access (never touches Anthropic credentials) |
-| A **renewal agent** holding a narrow, revocable spend permission | A card issuer (phase-2 cards are partner-issued, in the user's name) |
-| A **compliance gate**: IP geo-fencing, disclosures, screening | Available in sanctioned or Anthropic-unsupported regions |
+1. **Onboard** (~2 min): pick country + Claude plan → Subrail shows the *rail plan* (how to
+   get USDC, which payment leg, total monthly cost) → create a passkey smart wallet.
+2. **Get USDC** (~3 min): Peer onramp — pay a maker on a platform they already use (Mercado
+   Pago, Wise, Cash App…); USDC lands in *their* wallet on Base. Or deposit USDC from
+   anywhere else — the app doesn't care where stables come from.
+3. **Set up the payment leg** (once): primary — pass issuer KYC, get a virtual Visa in their
+   own name, grant the amount-bounded USDC allowance, enter the card at claude.ai checkout.
+4. **Stay subscribed**: before each billing date the agent tops the allowance to exactly one
+   cycle; Anthropic's recurring Stripe charge pulls USDC from the wallet at authorization;
+   the allowance drops back toward zero. Top-up nudges deep-link back into the Peer flow.
 
 ## 2. Architecture
 
@@ -49,132 +49,126 @@ choice below exists to satisfy one of three hard constraints:
        │                           │                              │
        ▼                           ▼                              ▼
 ┌─────────────┐          ┌──────────────────┐          ┌───────────────────────┐
-│ ONRAMP      │          │ AUTHORIZATION    │          │ RENEWAL SERVICE       │
-│ Peer/zkp2p  │          │ Coinbase Spend   │          │ (our backend agent)   │
-│ adapter     │          │ Permission on    │          │ scheduler + leg       │
-│  · desktop: │          │ user's smart     │◄─pull────│ executors; collects   │
-│    headless │          │ wallet (monthly  │  exact   │ its own fee via x402  │
-│    SDK + ext│          │ cap, allow-listed│  amount  │ (exact scheme, Base)  │
-│  · mobile:  │          │ recipients,      │  at      └──────────┬────────────┘
-│    Peer app │          │ revocable)       │  renewal            │ pays MoR
-│    handoff →│          └──────────────────┘                     ▼ directly
-│    RN SDK   │                                     ┌──────────────────────────┐
-│    (v1.5)   │      USDC stays in the user's       │ LAST-LEG MERCHANTS (MoR) │
-└─────────────┘      wallet until the moment of     │ A: Bitrefill API → Apple/│
-                     purchase; transfers go         │    Play gift code → IAP  │
-   USDC on Base ──►  user-wallet → merchant,        │ B: Claude gift code shop │
-   (Peer settles     never through a Subrail        │    (operator entity,     │
-    here natively)   omnibus balance                │    legal-gated)          │
-                                                    │ C: Bridge/Rain/Kulipa    │
-                                                    │    user-named virtual    │
-                                                    │    card (phase 2)        │
-                                                    └──────────────────────────┘
+│ STABLES     │          │ AUTHORIZATION    │          │ RENEWAL SERVICE       │
+│ ACQUISITION │          │ amount-bounded   │          │ scheduler + leg       │
+│ Peer/zkp2p  │          │ USDC allowance   │          │ executors; collects   │
+│ (preferred) │          │ from the user's  │◄─manage──│ its own fee via x402  │
+│ or any USDC │          │ smart wallet     │  window  │ (exact scheme, Base)  │
+│ deposit     │          │ (per cycle,      │          └──────────┬────────────┘
+└─────────────┘          │ revocable)       │                     │
+                         └────────┬─────────┘                     │
+   USDC on Base                   │ JIT pull at card              │ fallbacks
+   in the USER's wallet           ▼ authorization                 ▼
+                    ┌──────────────────────────────┐   ┌──────────────────────┐
+                    │ PRIMARY: USDC → STRIPE       │   │ FALLBACKS            │
+                    │ Bridge (Stripe Issuing) JIT  │   │ 1. Bitrefill →       │
+                    │ Visa debit in the user's     │   │    Apple/Play gift   │
+                    │ name → ordinary card-on-file │   │    card → IAP        │
+                    │ at claude.ai checkout →      │   │ 2. official Claude   │
+                    │ Anthropic's recurring charge │   │    gift code         │
+                    │ settles from the wallet      │   │    (claude.ai/gift)  │
+                    └──────────────────────────────┘   └──────────────────────┘
 ```
 
-Key flow property (C2): at renewal time the spend permission lets the renewal service execute a
-transfer **from the user's wallet directly to the merchant's deposit address** (e.g. a Bitrefill
-invoice address). Subrail's service wallet receives only its own service fee (an ordinary x402
-`exact` payment). User principal never transits Subrail.
+Key flow property: USDC sits in the user's wallet until the instant of value transfer —
+card authorization (primary) or merchant invoice payment (fallbacks). Subrail's service
+wallet receives only its own fee (an ordinary x402 `exact` payment).
 
-## 3. The rails router (core IP)
+## 3. The primary leg: USDC → Stripe via JIT card
 
-Input: country, Claude plan, platform accounts the user has, device. Output: ranked `RailPlan`s.
+This is the composability bet, confirmed by the mechanics research (01-research.md §4.5):
 
-| Example user | Onramp | Last leg | Notes |
-|---|---|---|---|
-| Argentina, Pro | Mercado Pago via Peer | **B**: Claude gift code (AR Apple gift-card availability unverified); **C** Bridge card (live in AR) phase 2 | Gnosis Pay also serves AR (consumer) |
-| Nigeria, Pro | Wise/Revolut via Peer (where held); else external USDC | **B**: Claude gift code (no Apple gift cards in NG); **C** Kulipa card phase 2 | Apple route unavailable — B is primary |
-| India, Pro | No Peer rail (no UPI) → external USDC / Wise | **A**: Apple IN gift card → Apple balance (the post-RBI standard) | Card route market-wide unavailable |
-| US underbanked, Max | Venmo/Cash App via Peer | **A** or **B** | Best liquidity corridor |
-| Brazil, Pro | Wise/Revolut (no native PIX on Peer) | **A**: Apple BR gift card; **C** Bridge (early 2026) | |
+- **Instrument:** Bridge (a Stripe company) stablecoin-backed virtual Visa via Stripe
+  Issuing, **non-custodial funding mode** — the card is issued in the user's name after
+  Bridge KYC, and is funded by an **amount-bounded ERC-20 approval** from the user's own
+  wallet to a developer-scoped Bridge delegate address. No prepaid float; Bridge pulls USDC
+  **at authorization**.
+- **Why it satisfies "interact with Stripe composably":** to claude.ai's Stripe Billing this
+  is an ordinary Visa debit card-on-file; merchant-initiated recurring charges are normally
+  SCA-exempt, so renewal succeeds iff allowance + balance cover the charge at the auth
+  instant — which is exactly the variable the agent controls.
+- **The renewal choreography (the agent's whole job):**
+  `T−24h` raise allowance to face × 1.03 → billing date: Anthropic charges, Bridge pulls
+  USDC → settle webhook confirms → after the Stripe Smart-Retries window, lower allowance
+  toward zero. Card and allowance ≈ $0 between cycles: minimal fraud/freeze surface.
+- **Failure handling:** declines inside the retry window are recoverable (hold the
+  allowance open, alert the user, top up balance); a terminal decline triggers fallback
+  selection. **No reimbursement is ever needed on this leg** — funds only move on success.
+- **Runner-up issuer:** Rain (Agent Control Layer: merchant allowlists, amount/frequency
+  caps, agent-issued cards) — better controls, enterprise-gated; adapter slot behind the
+  same `LastLeg` interface. Kulipa covers Nigeria.
+- **Known unknowns (M0 spikes):** Bridge program approval; explicit Base support for
+  Bridge's card contract (Solana confirmed; "EVM where deployed"); measured MIT decline
+  behavior on a live Claude subscription — no public data exists, so we generate it.
 
-Routing rules encode the verified constraints: gift-code durations ≥3 months and renew only at
-expiry (the #41499 stacking hazard); Apple region lock (card country == Apple ID country);
-geo-fence (OFAC comprehensive + Anthropic-unsupported list) evaluated continuously, not just at
-signup; RTPN ToS risk disclosure per platform (Wise/Revolut prohibitions surfaced verbatim).
+## 4. Rails router
 
-## 4. Decisions and rationale
+Input: country, plan, the user's platforms, device. Output: ranked `RailPlan`s.
+Ranking: **card leg first wherever an issuer covers the country**, then app-store, then
+gift code; ties by all-in cost.
 
-### D1 — Protocol: x402 + Coinbase Spend Permissions on Base now; MPP adapter later
-Peer settles USDC **natively on Base**; choosing Tempo would force a bridge (and USDC on Tempo
-is bridged USDC.e) for $20 payments. x402 is LF-governed with a live facilitator market on Base.
-Recurring authorization uses Coinbase Spend Permissions (periodic cap, allow-listed recipients,
-on-chain revocation) — the same primitive MPP offers natively; we hide both behind a
-`PaymentRail` interface so the MPP implementation (mppx) is a phase-2 drop-in. If Stripe ever
-fronts Anthropic with stablecoin subscriptions (its private preview is literally USDC on Base),
-the same wallet + permission stack pays it directly — Subrail's terminal state is becoming a
-thin wrapper over that, which is fine.
+| Example user | Stables acquisition | Payment leg |
+|---|---|---|
+| US underbanked, Max | Venmo/Cash App via Peer | **Card (Bridge)** |
+| Argentina, Pro | Mercado Pago via Peer | **Card (Bridge — AR live since launch)** |
+| Nigeria, Pro | external USDC / Wise where held | **Card (Kulipa)**; gift code fallback |
+| Brazil, Pro | Wise/Revolut via Peer | App-store (Apple BR gift card) until Bridge BR opens |
+| India, Pro | external USDC / Wise | App-store (Apple IN + balance — the post-RBI standard); no card issuer serves IN |
 
-### D2 — Last legs ranked A → B → C
-**A (app-store balance via Bitrefill MoR)** is primary where available: licensed MoR carries the
-regulated activity, Apple/Google handle recurring billing flawlessly, zero BIN/decline risk, and
-Anthropic is paid through a channel it fully supports. **B (official Claude gift codes)** covers
-the app-store-gift-card deserts (most of Africa): Anthropic-sanctioned mechanism, recipient
-needs no payment method; constrained by the no-stacking rule (≥3-month codes, renew at expiry)
-and gated on legal review + Anthropic outreach because the operator entity buys codes
-commercially. **C (user-named virtual cards via Bridge/Rain/Kulipa)** is phase 2: real APIs but
-approval-gated programs, BIN-decline risk on recurring charges, and zero coverage in South Asia.
+Routing rules still encode the verified hard constraints: gift codes ≥3 months and renewed
+only at expiry (stacking hazard, anthropics/claude-code#41499); Apple region lock; the
+geo-block list; per-platform disclosure strings.
 
-### D3 — Form factor: PWA + Peer-app handoff first, RN wrapper second
-Verification refuted the pure-PWA onramp (desktop-extension-only web integration). v1: the PWA
-runs everything *except* payment capture; on mobile the onramp hands off to Peer's native
-app/App Clip (user onramps to their Subrail wallet address; we detect USDC arrival on Base and
-resume), on desktop Chrome we run the full headless SDK + extension flow. v1.5: an Expo/RN shell
-embeds `@zkp2p/zkp2p-react-native-sdk` for the seamless in-app capture. This keeps one
-TypeScript codebase and ships the mobile-first experience without waiting on native review.
+## 5. Decisions
 
-### D4 — Wallet: passkey ERC-4337 smart account (Base)
-Target users have no seed-phrase tolerance. Passkey smart account (e.g. Coinbase Smart Wallet
-SDK or ZeroDev) gives: social-recovery-free onboarding, sponsored gas (Peer already sponsors for
-social-login users; we sponsor the rest via paymaster), and native Spend Permission support.
-Self-custody is also the compliance load-bearing wall (C2): Subrail never controls funds.
+- **D1 — Protocol: x402 + allowance management on Base now; Tempo MPP adapter later.**
+  Peer settles USDC natively on Base; the card delegate allowance and the x402 fee payment
+  live on the same chain. MPP remains the phase-2 adapter (`PaymentRail` interface).
+- **D2 — Legs: card primary; app-store and gift code as fallbacks** (§3, §4). Fallbacks are
+  also the bootstrap path while Bridge program approval is pending.
+- **D3 — Form factor:** PWA + Peer-app handoff on mobile (extension-free mobile web onramp
+  doesn't exist); desktop Chrome gets the full headless extension flow; Expo/RN shell with
+  Peer's RN SDK in v1.5.
+- **D4 — Wallet:** passkey ERC-4337 smart account on Base; self-custody is what keeps
+  Subrail a software orchestrator rather than a financial intermediary.
+- **D5 — Compliance scope:** geo-blocking (continuous, IP-based) + disclosures + delegated
+  KYC (RTPNs on fiat, issuer on cards). Reference analysis: 01-research.md §5.
+- **D6 — Reimbursement policy:** any pulled-but-undelivered USDC returns to the user's
+  onramp wallet automatically on cycle failure (scheduler emits `mark_failed` with
+  `reimburseUsd`); delivered artifacts (a gift code in hand) are not reimbursable.
 
-### D5 — Compliance posture (day one, not later)
-- **Geo-fence continuously** (Exodus/ShapeShift standard): block OFAC-comprehensive territories
-  and Anthropic-unsupported countries at IP + heuristics, every session.
-- **No custody, no credentials**: no Anthropic logins, no OAuth, no pooled USDC. The only thing
-  Subrail's backend can do with user funds is the narrow permitted pull to allow-listed
-  merchant addresses.
-- **MoR discipline**: Bitrefill/Reloadly (and phase-2 card issuers) are the regulated
-  counterparties. The Leg-B gift-code shop is the one place the operator entity itself sells a
-  digital good for USDC — launch-gated on an MSB/CASP legal memo (closed-loop prepaid-access
-  analysis, ≤$2k/day) and an outreach attempt to Anthropic.
-- **Honest disclosures**: RTPN ToS risk (Wise/Revolut prohibitions), Peer's no-recourse model,
-  Circle freeze risk, "Subrail is not affiliated with Anthropic."
+## 6. Unit economics (Pro, card leg)
 
-### D6 — Unit economics sketch
-Pro plan, Leg A: $20.00 face + ~0.5–1% Peer maker spread + Bitrefill markup (~0–2%, unverified)
-+ Subrail fee (target $1.00–1.50/mo via x402) + sponsored gas (<$0.01 on Base) ≈ **$21.5–23.5/mo
-all-in** — versus $30–40+/mo effective cost of the gray-market reseller/virtual-card status quo
-with decline-fee roulette. Builder fees from Peer integration partially offset the sponsored gas
-and facilitator costs.
+$20.00 face + ~1% Peer maker spread (acquisition) + ~1% issuer/leg fee (placeholder until
+Bridge pricing is verified) + $1.50 Subrail fee + sponsored gas (<$0.01) ≈ **$21.9/mo
+all-in** — vs $30–40+ effective on gray-market resellers/cards with decline roulette.
+Peer builder fees partially offset paymaster + facilitator costs.
 
-## 5. Risk register (top items)
+## 7. Risk register (operational)
 
-| Risk | Likelihood | Impact | Mitigation |
-|---|---|---|---|
-| Anthropic objects to commercial gift-code purchasing (Leg B) | M | H | Legal memo + proactive Anthropic outreach before scale; Leg A primary wherever possible; per-user purchase pattern (one code per named recipient, user-initiated) |
-| Gift redemption bugs (stacking/proration class) | M | M | ≥3-month codes; renew only at expiry boundary; redemption monitoring + support runbook; surface Anthropic support path to user |
-| Peer liquidity thin in a corridor | M | M | Pre-quote maker depth; fallback to external-USDC deposit; multi-platform routing |
-| RTPN bans a user/maker account | M | M (user trust) | Verbatim disclosure pre-onramp; platform ranking by enforcement history; never automate the user's fiat side |
-| Apple balance fails to auto-renew Claude in a country | M | M | Pilot matrix per country before enabling; fallback to Leg B |
-| Regulator deems Subrail a transmitter/CASP anyway (Samourai shadow) | L–M | H | Jurisdiction memo pre-launch; no custody/no pooled flows by construction; license or partner if counsel says so |
-| Circle freezes user USDC | L | H (user) | Disclosure; minimal standing balances (fund ≈1 cycle ahead) |
-| Stripe stablecoin subs reach Anthropic (obsolescence) | M (12–24mo) | Strategic | That's a win for users; Subrail's wallet+onramp+router remains the front end |
+| Risk | Mitigation |
+|---|---|
+| MIT auth fires outside the allowance window (Stripe Smart Retries timing) | Open window T−24h, hold through retry window; auth webhooks tighten the billing-date estimate each cycle; alert + fallback on terminal decline |
+| Bridge doesn't enumerate Base / program approval slow | Kulipa/Rain adapters behind `LastLeg`; fallback legs carry launch corridors meanwhile |
+| Wallet underfunded at renewal | T−72h balance forecast → top-up nudge deep-linking into Peer flow |
+| Gift-code redemption bugs (stacking/proration class) | ≥3-month codes; renew at expiry boundary only; support runbook |
+| Peer corridor liquidity thin | Pre-quote maker depth; `external_deposit` always available |
+| RTPN account friction for users/makers | Disclosure strings per platform; never automate the user's fiat side |
+| Geo-block evasion | Continuous IP checks on every session + mutating call; VPN heuristics step-up |
 
-## 6. Phasing
+## 8. Phasing
 
-- **M0 — Validation spikes (no product):** hand-driven pilots: (1) Bitrefill business API →
-  Apple gift card → Apple balance → Claude iOS sub auto-renew, in BR/AR/IN/US; (2) buy + redeem
-  3-month Claude gift codes incl. an expiry-boundary renewal; (3) Peer onramp e2e on desktop
-  ext + Peer mobile app handoff; (4) legal memo (MSB/CASP + Leg B).
-- **M1 — v1 PWA:** wallet + Peer handoff onramp + Leg A in app-store countries + manual-trigger
-  renewals (user taps "renew now"; agent executes). Soft-launch corridors: AR, BR, US.
-- **M2 — Autonomy:** spend permissions + scheduled renewals + balance forecasting/top-up nudges;
-  Leg B behind legal gate (NG, KE, GH, EG, BD corridors).
-- **M3 — v1.5 RN shell** (embedded Peer capture) + Bridge/Kulipa card pilot (Leg C) + MPP
-  adapter + x402 Bazaar listing of the renewal service.
+- **M0 — spikes:** (1) **Bridge card pilot**: issue a test card, put it on a real Claude
+  Pro subscription, measure MIT auth behavior across 3 cycles incl. one deliberate
+  allowance-miss + recovery; (2) confirm Base support with Bridge; (3) Peer onramp e2e
+  (desktop ext + app handoff); (4) Apple-balance auto-renew pilots (BR/IN/US) for fallback 1.
+- **M1 — v1:** wallet + Peer/deposit acquisition + card leg in Bridge-covered corridors
+  (US/AR/MX/CO/PE/CL/EC) + manual-trigger renewals + reimbursement path live.
+- **M2 — autonomy:** allowance choreography on schedule, balance forecasting, fallback legs
+  active (app-store; gift code behind `FEATURE_LEG_B`), Kulipa corridor (NG).
+- **M3 — v1.5:** RN shell (embedded Peer capture), Rain adapter (agent-scoped cards), MPP
+  adapter, x402 Bazaar listing.
 
-Success metrics: funded-wallet → active-subscription conversion; renewal success rate (target
->99% Leg A); all-in cost vs face price (≤+15%); zero compliance incidents; corridor liquidity
-fill rate.
+Success metrics: renewal success rate on the card leg (target >98% with retry recovery);
+funded-wallet → active-subscription conversion; all-in cost ≤ face +15%; reimbursement
+latency <1h on failed cycles.
