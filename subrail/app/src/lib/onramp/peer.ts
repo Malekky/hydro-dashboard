@@ -43,6 +43,15 @@ export function peerExtensionReady(): boolean {
   return isPeerExtensionAvailable();
 }
 
+/**
+ * Without the curator key, the SDK still quotes but signalIntent can't auto-fetch its
+ * gating-service signature — so the embedded checkout is disabled and the UI routes
+ * friends to peer.xyz to onramp directly to their wallet address instead.
+ */
+export function peerEmbeddedCheckoutReady(): boolean {
+  return Boolean(process.env.NEXT_PUBLIC_ZKP2P_API_KEY);
+}
+
 export { openPeerExtensionInstallPage };
 
 export async function getBestOnrampQuote(

@@ -8,7 +8,7 @@ import {
 } from 'wagmi';
 import {
   captureBuyerPayment, createPeerClient, fulfillWithCapture, getBestOnrampQuote,
-  openPeerExtensionInstallPage, peerExtensionReady, signalQuotedIntent,
+  openPeerExtensionInstallPage, peerEmbeddedCheckoutReady, peerExtensionReady, signalQuotedIntent,
 } from '@/lib/onramp/peer';
 import { USDC_ADDRESS, USDC_DECIMALS, usdToUnits } from '@/lib/chain/usdc';
 import { PLAN_FACE_USD, type ClaudePlan, type PeerPlatform } from '@/lib/types';
@@ -155,7 +155,21 @@ function FundStep({ wallet, platform, targetUsd, balanceUsd }: {
       {platform && (
         <div style={{ marginBottom: '1.1rem' }}>
           <h3>Pay with {platformName}</h3>
-          {!hasExtension ? (
+          {!peerEmbeddedCheckoutReady() ? (
+            <>
+              <p style={{ color: 'var(--ink-2)' }}>
+                Onramp on Peer with your {platformName} account — pick an offer, pay the
+                seller, and have the USDC sent to <strong>your wallet address below</strong>.
+                Your balance here updates the moment it arrives.
+              </p>
+              <a className="btn btn-primary" href="https://peer.xyz" target="_blank" rel="noreferrer">
+                Open peer.xyz
+              </a>
+              <p className="hint" style={{ marginTop: '0.6rem' }}>
+                In-app checkout lands once our Peer partner key is live — same flow, fewer taps.
+              </p>
+            </>
+          ) : !hasExtension ? (
             <>
               <p style={{ color: 'var(--ink-2)' }}>
                 The Peer extension for desktop Chrome verifies your {platformName} payment
