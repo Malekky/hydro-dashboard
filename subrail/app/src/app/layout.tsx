@@ -28,8 +28,8 @@ export default function RootLayout({ children }: { children: ReactNode }) {
               Subrail
             </Link>
             <nav className="nav-links" aria-label="Main">
-              <Link href="/">Get started</Link>
-              <Link href="/operator">Operator</Link>
+              <Link href="/subscribe">Get Claude</Link>
+              <Link href="/solver">Solve</Link>
             </nav>
           </div>
         </header>

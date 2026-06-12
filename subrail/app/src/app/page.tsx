@@ -184,7 +184,7 @@ export default function Landing() {
                   <div style={{ marginTop: '0.9rem' }}>
                     <Link
                       className="btn btn-primary"
-                      href={`/onboarding?plan=${plan}&platform=${q.peerPlatform ?? ''}`}
+                      href={`/subscribe?plan=${plan}`}
                     >
                       Start with this route
                     </Link>

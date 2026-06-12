@@ -63,26 +63,45 @@ A solver proof is only worth the escrow if it cryptographically binds the purcha
 Binding (1)+(2)+(3)+(4) is what makes refusing-to-deliver and self-dealing both
 unprofitable: the only way to a valid proof is an actual gift to the actual email.
 
+## The capture layer (corrected)
+
+zkp2p's extension is **not reusable here**: `peer.authenticate` is template-driven from
+`api.zkp2p.xyz/providers/` and only captures Peer's configured payment platforms — it will
+not capture claude.ai. And a capture layer is *unavoidable* for any live-session proof:
+it's the component that sits in the solver's authenticated browser session, reads the order
+response the page already fetched, and hands it to a prover (even the TEE path needs it —
+zkp2p V3 captures via its extension, then attests).
+
+**Decision: use Reclaim Protocol as the capture + zkTLS proof layer** (not a bespoke
+extension we build/maintain). We author a **custom claude.ai provider** (which order/billing
+request to capture, which fields to extract) and Reclaim's extension/app SDK generates a
+zkTLS proof from the solver's own session, verified on Base inside our escrow.
+
+Why zkTLS over zkEmail here: the proof binds to the **live TLS transcript of claude.ai's
+server response** — it cannot be counterfeited, whereas a receipt email is solver-held
+content that's easier to forge/spoof and whose DKIM domain/template is fragile. Email
+verification stays a *possible later add*, not the trust root.
+
+Capture caveat: claude.ai is Cloudflare-protected and the ToS bans *automated* access —
+Reclaim captures **passively** (reads what the human's own session already loaded), and the
+solver is a real person making a real purchase, which is the compliant shape; still requires
+a hands-on test against live Cloudflare.
+
 ## Proof source: solver's purchase artifacts (best → fallback)
 
-The solver, logged into their claude.ai account, can prove the purchase from any of:
+The solver, logged into their claude.ai account, proves the purchase via:
 
-- **A) zkTLS web-proof of the order/receipt page** (Reclaim/Primus provider for
-  claude.ai → Settings/Billing or the gift confirmation page). Proves *the solver's
-  account made this gift, to this email, for this plan, just now*. Strongest binding to the
-  solver; Cloudflare matters little since a real human drives the session. Build a custom
-  provider (no claude.ai provider exists yet).
-- **B) zkEmail of the solver's "your gift was sent" confirmation** (Anthropic emails the
-  *purchaser* a receipt). DKIM-signed; selective-disclose plan + recipient-hash, hide the
-  code. Non-interactive, replayable on Base.
-- **C) TEE attestation** (the zkp2p V3 pattern): our TEE validates the solver's captured
-  session and emits an EIP-712 attestation a Base verifier consumes. Ships fastest;
-  centralization we disclose; the migration target is A/B.
+- **CHOSEN — zkTLS web-proof of the order page** (Reclaim provider for claude.ai →
+  Settings/Billing / order-history endpoint). Proves *the solver's account made this gift,
+  to this email, for this plan, just now*, bound to the live TLS transcript. Build a custom
+  Reclaim provider (none exists yet); proof verified on Base in our escrow.
+- *Deferred — zkEmail* of the purchaser's receipt: forgeable/spoofable relative to a live
+  TLS proof and DKIM-template-fragile, so not the trust root. Possible later add.
+- *Deferred — TEE attestation* (zkp2p V3 pattern): only if a claude.ai field we need can't
+  be captured cleanly via Reclaim.
 
-**v1 ships C (TEE capture, Peer-style) behind a `Verifier` interface**, with an optimistic
-bond+window as the safety net while the attester is single-operator; A (zkTLS) is the
-decentralization upgrade once a claude.ai provider is built and the real artifacts are
-captured.
+**v1 ships the Reclaim zkTLS verifier behind the `Verifier` interface**, with an optimistic
+bond+window as a safety net during early operation.
 
 ## The two $20 unknowns to resolve before circuit/provider work
 
@@ -110,13 +129,49 @@ zkp2p's verifier registry is multisig-permissioned (can't add a custom platform)
 
 ## App surface (reuses what's built)
 
-- **User flow** (today's onboarding, minus the card step): onramp via Peer → `open` an
-  intent with plan + email → watch for fulfillment → receive the gift from Anthropic.
-- **Solver console** (replaces/*generalizes* the operator console): open intents feed →
-  "claim" → guided gift purchase on claude.ai → capture proof (extension/TEE, Peer-style) →
-  `fulfill` → escrow paid out. Your Gnosis Pay card is just how *you, a solver*, pay
-  Anthropic — no longer shared infrastructure.
-- Geo-gate, rails router (now routing only the onramp), reimbursement-on-timeout: reused.
+- **User flow:** connect wallet → `open` an intent with plan + months + email (USDC must be
+  in the wallet; **onramp is a later add — for now the user funds the wallet however they
+  like**, Peer included once re-wired) → watch for fulfillment → receive the gift from
+  Anthropic → (or `refund` after expiry).
+- **Solver console** (generalizes the operator console): open-intents feed → "claim" →
+  guided gift purchase on claude.ai → **capture proof via the Reclaim flow** → `fulfill` →
+  escrow paid out. Your Gnosis Pay card is just how *you, a solver*, pay Anthropic.
+- Geo-gate and reimbursement-on-timeout (escrow `refund`): reused. Onramp/rails router:
+  deferred, slots back in on the user's funding step.
+
+## Reclaim integration (verified API, 2026-06-12)
+
+- **Stack:** `@reclaimprotocol/js-sdk` v5.2.0 (`ReclaimProofRequest.init(appId, appSecret,
+  providerId)` → `triggerReclaimFlow()` → `startSession({onSuccess,onError})` →
+  `transformForOnchain(proof)`). On-chain: `@reclaimprotocol/verifier-solidity-sdk`
+  (`Reclaim.sol`) — our escrow calls `verifyProof(proof)`, then re-checks our business
+  rules. **Not** zkFetch (that proves a *server's* request, not the solver's own session).
+- **Capture mode:** human-in-browser (the solver drives their own claude.ai session); for
+  the Cloudflare-protected SPA/XHR, the **browser-extension SDK** is the robust path.
+- **Provider:** a CUSTOM HTTP provider (dev.reclaimprotocol.org) on claude.ai's order
+  endpoint with `responseRedactions` (jsonPath) — **redact the gift code**, reveal
+  recipient-hash/plan/months/order-id/timestamp. Yields `PROVIDER_ID` (+ `APP_ID`,
+  `APP_SECRET`).
+- **Binding (critical):** inject `addContext(intentId, {escrow, intentId})` → lands in
+  `claimInfo.context`, covered by the claim identifier hash. On-chain, after
+  `verifyProof`, **re-assert** context.intentId == arg and escrow == this, and record the
+  order-id nullifier — `verifyProof` proves the transcript is authentic, NOT our rules.
+- **Trust/perf:** proxy/attestor model (~2-4s proofs); witness set is substantially
+  Reclaim-operated today — a disclosed trust assumption. Base verifier address surfaced as
+  `0x8CDc031d5B7F148ab0435028B16c682c469CEfC3` — **verify against Addresses.sol before
+  mainnet**.
+- **Gotcha:** claude.ai exposes no documented order API; we capture an internal endpoint
+  whose schema can drift — keep the field mapping isolated (`reclaim.ts parseProof`), anchor
+  on stable scalars, expect to maintain the provider.
+
+## Build order
+
+1. Escrow contract + pure binding (`lib/solver/*`) — **done**.
+2. Reclaim integration: custom claude.ai provider + client proof request +
+   `ReclaimPurchaseVerifier` (maps a verified Reclaim proof → bound `GiftPurchaseAttestation`
+   + on-chain calldata). Gated on the $20 artifact capture (which order endpoint/fields).
+3. UI: user intent-open/refund flow + solver console (claim → Reclaim capture → fulfill).
+4. Onramp re-wire on the user funding step (Peer).
 
 ## Risks (carried from research)
 
